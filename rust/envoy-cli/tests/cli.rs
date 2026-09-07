@@ -102,6 +102,7 @@ fn help_lists_expected_flags() {
         "--set-stack <NAME_OR_PATH>",
         "--get-stack",
         "--list-stacks",
+        "--override-bundle <BNDLID=PATH>",
         "--set-config <KEY=VALUE>",
         "--get-config [<KEY>]",
         "--list-configs",
@@ -113,6 +114,7 @@ fn help_lists_expected_flags() {
         "--trace <VAR>",
         "-cf",
         "-s",
+        "-o",
     ] {
         assert!(
             stdout.contains(expected),
@@ -792,6 +794,202 @@ fn shell_mode_with_a_raw_executable_path_inherits_the_system_environment() {
     assert!(
         !stdout.contains("Failed to prepare environment"),
         "stdout was:\n{stdout}"
+    );
+}
+
+/// Writes a bundle whose `mytool` command sets `SOURCE_MARKER` to `value`,
+/// for asserting which of two candidate bundle roots actually won.
+fn write_marker_bundle(bundle_root: &Path, value: &str) {
+    let envoy_dir = bundle_root.join(".envoy");
+    fs::create_dir_all(&envoy_dir).expect(".envoy dir should be created");
+    fs::write(
+        envoy_dir.join("commands.json"),
+        r#"{"mytool": {"environment": ["mytool_env.json"]}}"#,
+    )
+    .expect("commands.json should be written");
+    fs::write(
+        envoy_dir.join("mytool_env.json"),
+        format!(r#"{{"SOURCE_MARKER": "{value}"}}"#),
+    )
+    .expect("mytool_env.json should be written");
+}
+
+#[test]
+fn override_bundle_substitutes_a_stack_discovered_bundles_root() {
+    let scratch = ScratchDir::new("envoy_override_bundle_stack");
+    let bundle_root = scratch.path().join("gt").join("maya");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    write_marker_bundle(&bundle_root, "original-bundle");
+
+    let override_root = scratch.path().join("dev_checkout");
+    write_marker_bundle(&override_root, "overridden-bundle");
+
+    let stack_path = scratch.path().join("studio.estack");
+    write_stack(&stack_path, "bfd", &bundle_root);
+
+    let assert = base_command()
+        .arg("--stack")
+        .arg(&stack_path)
+        .arg("-o")
+        .arg(format!("gt:maya={}", override_root.display()))
+        .args(["--diagnose", "mytool"])
+        .assert()
+        .success();
+    let stdout = stdout_text(&assert);
+
+    assert!(
+        stdout.contains("SOURCE_MARKER = overridden-bundle"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&override_root.display().to_string()),
+        "diagnose should report the substituted root, stdout was:\n{stdout}"
+    );
+}
+
+#[test]
+fn override_bundle_substitutes_a_root_discovered_bundles_root() {
+    let scratch = ScratchDir::new("envoy_override_bundle_roots");
+    let bundle_root = scratch.path().join("gt").join("maya");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    write_marker_bundle(&bundle_root, "original-bundle");
+
+    let override_root = scratch.path().join("dev_checkout");
+    write_marker_bundle(&override_root, "overridden-bundle");
+
+    let assert = base_command()
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .arg("--override-bundle")
+        .arg(format!("gt:maya={}", override_root.display()))
+        .args(["--diagnose", "mytool"])
+        .assert()
+        .success();
+    let stdout = stdout_text(&assert);
+
+    assert!(
+        stdout.contains("SOURCE_MARKER = overridden-bundle"),
+        "stdout was:\n{stdout}"
+    );
+}
+
+#[test]
+fn override_bundle_repeated_for_the_same_bndlid_uses_the_last_value() {
+    let scratch = ScratchDir::new("envoy_override_bundle_last_wins");
+    let bundle_root = scratch.path().join("gt").join("maya");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    write_marker_bundle(&bundle_root, "original-bundle");
+
+    let override_a = scratch.path().join("dev_a");
+    write_marker_bundle(&override_a, "override-a");
+    let override_b = scratch.path().join("dev_b");
+    write_marker_bundle(&override_b, "override-b-wins");
+
+    let assert = base_command()
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .arg("-o")
+        .arg(format!("gt:maya={}", override_a.display()))
+        .arg("-o")
+        .arg(format!("gt:maya={}", override_b.display()))
+        .args(["--diagnose", "mytool"])
+        .assert()
+        .success();
+    let stdout = stdout_text(&assert);
+
+    assert!(
+        stdout.contains("SOURCE_MARKER = override-b-wins"),
+        "stdout was:\n{stdout}"
+    );
+}
+
+#[test]
+fn override_bundle_reports_an_unmatched_bndlid() {
+    let scratch = ScratchDir::new("envoy_override_bundle_unmatched");
+    let bundle_root = scratch.path().join("gt").join("maya");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    write_marker_bundle(&bundle_root, "original-bundle");
+    let override_root = scratch.path().join("dev_checkout");
+    write_marker_bundle(&override_root, "overridden-bundle");
+
+    let assert = base_command()
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .arg("--override-bundle")
+        .arg(format!("gt:does-not-exist={}", override_root.display()))
+        .args(["--list"])
+        .assert()
+        .failure();
+    let stderr = stderr_text(&assert);
+
+    assert!(
+        stderr.contains("'gt:does-not-exist' does not match any discovered bundle"),
+        "stderr was:\n{stderr}"
+    );
+}
+
+#[test]
+fn override_bundle_reports_an_invalid_override_path() {
+    let scratch = ScratchDir::new("envoy_override_bundle_invalid_path");
+    let bundle_root = scratch.path().join("gt").join("maya");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    write_marker_bundle(&bundle_root, "original-bundle");
+    let not_a_bundle = scratch.path().join("just_a_folder");
+    fs::create_dir_all(&not_a_bundle).expect("plain folder should be created");
+
+    let assert = base_command()
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .arg("--override-bundle")
+        .arg(format!("gt:maya={}", not_a_bundle.display()))
+        .args(["--list"])
+        .assert()
+        .failure();
+    let stderr = stderr_text(&assert);
+
+    assert!(
+        stderr.contains("override path is not a valid bundle"),
+        "stderr was:\n{stderr}"
+    );
+}
+
+#[test]
+fn override_bundle_rejects_a_malformed_value() {
+    let scratch = ScratchDir::new("envoy_override_bundle_malformed");
+
+    let assert = base_command()
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .args(["--override-bundle", "no-equals-sign", "--list"])
+        .assert()
+        .failure();
+    let stderr = stderr_text(&assert);
+
+    assert!(
+        stderr.contains("expected BNDLID=PATH"),
+        "stderr was:\n{stderr}"
+    );
+}
+
+#[test]
+fn override_bundle_errors_when_no_bundles_were_discovered() {
+    let scratch = ScratchDir::new("envoy_override_bundle_no_bundles");
+    let envoy_dir = scratch.path().join(".envoy");
+    fs::create_dir_all(&envoy_dir).expect(".envoy dir should be created");
+    fs::write(
+        envoy_dir.join("commands.json"),
+        r#"{"known": {"environment": []}}"#,
+    )
+    .expect("commands.json should be written");
+
+    let assert = base_command()
+        .arg("--commands-file")
+        .arg(envoy_dir.join("commands.json"))
+        .arg("--override-bundle")
+        .arg("gt:maya=C:/dev/maya")
+        .args(["--list"])
+        .assert()
+        .failure();
+    let stderr = stderr_text(&assert);
+
+    assert!(
+        stderr.contains("--override-bundle requires bundles discovered"),
+        "stderr was:\n{stderr}"
     );
 }
 
