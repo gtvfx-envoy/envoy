@@ -26,12 +26,17 @@ jobs:
           python-version: '3.11.9'
 
       - name: Install ruff
+        id: install_ruff
         run: python -m pip install --upgrade pip && pip install ruff
 
       - name: Run ruff check
         run: ruff check scripts rust/envoy-py/python rust/envoy-py/tests
 
+      # Independent of `ruff check` above: without the guard a lint failure
+      # short-circuits the job and hides any formatting drift, so a single
+      # push can only ever surface one of the two.
       - name: Run ruff format --check
+        if: ${{ !cancelled() && steps.install_ruff.outcome == 'success' }}
         run: ruff format --check scripts rust/envoy-py/python rust/envoy-py/tests
 
   rust:
@@ -48,10 +53,18 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry/build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
+      # fmt / clippy / tests are three *independent* checks. Without the
+      # `!cancelled()` guards below, a step's default condition is "all
+      # previous steps succeeded", so a trivial formatting failure
+      # short-circuits the job before Clippy and the tests ever run --
+      # hiding real compile errors and test failures until someone happens
+      # to run them locally. `!cancelled()` (rather than `always()`) still
+      # lets an explicit workflow cancellation stop the job promptly.
       - name: Run cargo fmt --check
         working-directory: rust
         run: cargo fmt --check
@@ -60,10 +73,12 @@ jobs:
         # envoy-py requires linking against a Python interpreter (pyo3) and
         # is built/tested separately via maturin (see build-release.yml),
         # not as part of this plain cargo workspace check.
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo clippy --workspace --exclude envoy-py --all-targets -- -D warnings
 
       - name: Run cargo test
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo test --workspace --exclude envoy-py
 
@@ -86,15 +101,22 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry/build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
+      # As in the `rust` job above: fmt / clippy / test are independent, so
+      # guard each against an earlier one short-circuiting the job. The
+      # wheel chain below is different -- those steps genuinely depend on
+      # each other, so they're gated on the preceding step's own outcome
+      # rather than run unconditionally.
       - name: Run cargo fmt --check
         working-directory: rust
         run: cargo fmt --check -p envoy-py
 
       - name: Run cargo clippy
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo clippy -p envoy-py --all-targets -- -D warnings
 
@@ -109,15 +131,20 @@ jobs:
         # -L flag points nowhere and linking envoy-py's test binary
         # against libpython fails. LIBRARY_PATH is read directly by cc/ld
         # as an additional search directory, independent of that guess.
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: LIBRARY_PATH="$pythonLocation/lib" cargo test -p envoy-py --lib
 
       - name: Build wheel with maturin
+        id: build-wheel
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         run: |
           pip install maturin
           python -m maturin build --release --manifest-path rust/envoy-py/Cargo.toml
 
       - name: Install built wheel + pytest
+        id: install-wheel
+        if: ${{ !cancelled() && steps.build-wheel.outcome == 'success' }}
         run: |
           pip install pytest
           pip install --force-reinstall --no-index --find-links rust/target/wheels envoy
@@ -127,6 +154,7 @@ jobs:
         # crate compiles/its own Rust unit tests pass) -- see
         # rust/envoy-py/tests/python_contract/README.md and
         # rust/envoy-py/tests/consumer_smoke/README.md for scope/rationale.
+        if: ${{ !cancelled() && steps.install-wheel.outcome == 'success' }}
         run: python -m pytest rust/envoy-py/tests -v
 
   windows:
@@ -196,25 +224,34 @@ jobs:
           Write-Host "MSVC toolchain verified (cl.exe and link.exe both resolve to MSVC)"
 
       - name: Cache Rust build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
+      # The two `cargo test` invocations are independent of each other, so
+      # a native-workspace failure shouldn't hide a PyO3 binding failure.
+      # The wheel steps below genuinely depend on the preceding step, so
+      # they're gated on its outcome rather than run unconditionally.
       - name: Test native workspace
         working-directory: rust
         run: cargo test --workspace --exclude envoy-py
 
       - name: Test Rust Python bindings
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo test -p envoy-py --lib
 
       - name: Build wheel
+        id: build-wheel
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         shell: pwsh
         run: |
           python -m pip install maturin pytest
           python -m maturin build --release --manifest-path rust/envoy-py/Cargo.toml
 
       - name: Test installed wheel
+        if: ${{ !cancelled() && steps.build-wheel.outcome == 'success' }}
         shell: pwsh
         run: |
           python -m pip install --force-reinstall --no-index --find-links rust/target/wheels envoy
