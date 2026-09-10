@@ -26,6 +26,7 @@ jobs:
           python-version: '3.11.9'
 
       - name: Install ruff
+        id: install_ruff
         run: python -m pip install --upgrade pip && pip install ruff
 
       - name: Run ruff check
@@ -35,7 +36,7 @@ jobs:
       # short-circuits the job and hides any formatting drift, so a single
       # push can only ever surface one of the two.
       - name: Run ruff format --check
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.install_ruff.outcome == 'success' }}
         run: ruff format --check scripts rust/envoy-py/python rust/envoy-py/tests
 
   rust:
@@ -52,6 +53,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry/build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -71,12 +73,12 @@ jobs:
         # envoy-py requires linking against a Python interpreter (pyo3) and
         # is built/tested separately via maturin (see build-release.yml),
         # not as part of this plain cargo workspace check.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo clippy --workspace --exclude envoy-py --all-targets -- -D warnings
 
       - name: Run cargo test
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo test --workspace --exclude envoy-py
 
@@ -99,6 +101,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry/build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -113,7 +116,7 @@ jobs:
         run: cargo fmt --check -p envoy-py
 
       - name: Run cargo clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo clippy -p envoy-py --all-targets -- -D warnings
 
@@ -128,13 +131,13 @@ jobs:
         # -L flag points nowhere and linking envoy-py's test binary
         # against libpython fails. LIBRARY_PATH is read directly by cc/ld
         # as an additional search directory, independent of that guess.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: LIBRARY_PATH="$pythonLocation/lib" cargo test -p envoy-py --lib
 
       - name: Build wheel with maturin
         id: build-wheel
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         run: |
           pip install maturin
           python -m maturin build --release --manifest-path rust/envoy-py/Cargo.toml
@@ -221,6 +224,7 @@ jobs:
           Write-Host "MSVC toolchain verified (cl.exe and link.exe both resolve to MSVC)"
 
       - name: Cache Rust build artifacts
+        id: rust_prereqs
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -234,13 +238,13 @@ jobs:
         run: cargo test --workspace --exclude envoy-py
 
       - name: Test Rust Python bindings
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         working-directory: rust
         run: cargo test -p envoy-py --lib
 
       - name: Build wheel
         id: build-wheel
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.rust_prereqs.outcome == 'success' }}
         shell: pwsh
         run: |
           python -m pip install maturin pytest
