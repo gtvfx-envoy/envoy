@@ -181,6 +181,20 @@ WARNING - Command 'python' from gt:bundle-b overrides existing command from gt:b
 
 Use `--verbose` to surface these warnings and adjust bundle order in your stack or `ENVOY_BNDL_ROOTS` to control priority.
 
+## Local Bundle Overrides
+
+`--override-bundle BNDLID=PATH` (short: `-o`) substitutes a local checkout
+for a bundle that was already discovered via a Stack or `ENVOY_BNDL_ROOTS`,
+without hand-writing a custom Stack file for a one-off local change:
+
+```powershell
+en -o gt:maya=R:/dev/maya --stack studio python script.py
+```
+
+It only ever swaps the root path of a bundle the Stack or discovery process
+already found -- it can't inject a bundle that wasn't otherwise part of
+resolution. See the [CLI reference](cli-reference/envoy.md#--override-bundle---o) for the full flag details and error behavior.
+
 ## Environment Variables
 
 | Variable | Separator | Description |

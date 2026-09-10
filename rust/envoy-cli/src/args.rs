@@ -1,4 +1,4 @@
-use clap::{CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory, Parser};
 
 const LEGACY_ALIAS_HELP: &str = "Legacy compatibility aliases: -cf, -sc, -gc, -lc, -ic";
 
@@ -83,6 +83,17 @@ resolution) and exit."
         help = "List all named stacks discovered via ENVOY_STACK_ROOTS and exit."
     )]
     pub list_stacks: bool,
+
+    #[arg(
+        long = "override-bundle",
+        short = 'o',
+        value_name = "BNDLID=PATH",
+        action = ArgAction::Append,
+        help = "Substitute a local checkout for a bundle a resolved Stack or \
+ENVOY_BNDL_ROOTS discovery would otherwise use. Repeatable; the last value \
+wins for a given BNDLID."
+    )]
+    pub override_bundle: Vec<String>,
 
     #[arg(
         long = "set-config",
@@ -318,7 +329,7 @@ fn legacy_alias(token: &str) -> Option<(&'static str, Option<ValueExpectation>, 
 fn option_value_expectation(token: &str) -> Option<ValueExpectation> {
     match token {
         "--info" | "--which" | "--commands-file" | "--stack" | "-s" | "--set-config" | "--env"
-        | "-e" | "--trace" => Some(ValueExpectation::Required),
+        | "-e" | "--trace" | "--override-bundle" | "-o" => Some(ValueExpectation::Required),
         "--get-config" | "--diagnose" | "--docs" => Some(ValueExpectation::Optional),
         _ => None,
     }
@@ -385,5 +396,37 @@ mod tests {
         let expected = strings(&["-e", "python", "-s", "studio", "maya", "-gc"]);
 
         assert_eq!(canonicalize_legacy_aliases(&input), expected);
+    }
+
+    /// Regression guard: `--override-bundle`/`-o` take a required value.
+    /// Without `option_value_expectation` recognizing them, the loop would
+    /// treat the `BNDLID=PATH` value as the very next "command" token,
+    /// corrupting argument parsing for every invocation using this flag.
+    #[test]
+    fn canonicalize_legacy_aliases_treats_override_bundle_value_as_an_option_value() {
+        let input = strings(&["--override-bundle", "gt:maya=C:\\dev\\maya", "maya"]);
+
+        assert_eq!(canonicalize_legacy_aliases(&input), input);
+    }
+
+    #[test]
+    fn canonicalize_legacy_aliases_treats_override_bundle_short_flag_as_an_option_value() {
+        let input = strings(&[
+            "-o",
+            "gt:maya=C:\\dev\\maya",
+            "-o",
+            "gt:unreal=/dev/unreal",
+            "maya",
+        ]);
+
+        assert_eq!(canonicalize_legacy_aliases(&input), input);
+    }
+
+    #[test]
+    fn normalize_argv_expands_override_bundle_equals_form_without_mangling_the_value() {
+        let input = strings(&["--override-bundle=gt:maya=C:\\dev\\maya", "maya"]);
+        let expected = strings(&["--override-bundle", "gt:maya=C:\\dev\\maya", "maya"]);
+
+        assert_eq!(normalize_argv(&input), expected);
     }
 }

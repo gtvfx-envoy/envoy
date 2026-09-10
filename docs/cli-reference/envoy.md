@@ -31,6 +31,7 @@ en    [OPTIONS] [command] [args ...]
 | `--list-configs` | `-lc` | List all known configurable settings |
 | `--ignore-config` | `-ic` | Bypass user config for this run |
 | `--env ENV_COMMAND` | `-e` | Run command inside a different command's environment |
+| `--override-bundle BNDLID=PATH` | `-o` | Substitute a local checkout for a bundle a resolved Stack or discovery would otherwise use. Repeatable |
 | `--tag TAG` | | Attach a free-text tag to this invocation's telemetry record, if enabled. Truncated to 200 characters |
 | `--incognito` | | Disable telemetry for this invocation only |
 | `--shell` | | Drop into an interactive shell inside a command's resolved environment, instead of running it |
@@ -255,6 +256,33 @@ Point directly at a `commands.json`, bypassing bundle discovery entirely:
 
 ```powershell
 en -c R:/my-project/.envoy/commands.json my_command
+```
+
+### `--override-bundle` / `-o`
+
+Substitute a local checkout for a bundle a resolved Stack or
+`ENVOY_BNDL_ROOTS` discovery would otherwise use, without hand-writing a
+custom Stack file. Repeatable; specifying the same `BNDLID` more than once
+uses the *last* value:
+
+```powershell
+en -o gt:maya=R:/dev/maya python script.py
+en --override-bundle gt:maya=R:/dev/maya --override-bundle gt:unreal=R:/dev/unreal --list
+```
+
+`BNDLID` must match the `namespace:name` of a bundle actually discovered by
+the resolved Stack or bundle-root discovery -- this flag only ever swaps an
+already-discovered bundle's root path, it never adds a bundle the Stack
+wouldn't otherwise use. `PATH` must point at a directory containing its own
+`.envoy/` directory. Either condition failing is a hard error (not a
+silently-ignored no-op), reporting every problem across all
+`--override-bundle` values at once:
+
+```powershell
+en -o gt:does-not-exist=R:/dev/maya --list
+# Error: --override-bundle problem(s):
+#   'gt:does-not-exist' does not match any discovered bundle
+# Run 'envoy --diagnose' to see discovered bundles
 ```
 
 ## Environment Variables

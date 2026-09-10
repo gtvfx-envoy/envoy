@@ -19,13 +19,14 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::bundle_cache::BundleCache;
 use crate::commands::{find_commands_file, CommandDefinition, CommandRegistry};
 use crate::discovery::{
-    discover_bundles_auto, discover_bundles_from_roots, is_published_bundle, Bundle, BundleInfo,
-    BUNDLE_CHECKOUT, BUNDLE_ENV_DIR,
+    discover_bundles_auto, discover_bundles_from_roots, is_published_bundle, validate_bundle,
+    Bundle, BundleInfo, BUNDLE_CHECKOUT, BUNDLE_ENV_DIR,
 };
 use crate::environment::EnvironmentManager;
 use crate::error::{EnvoyError, Result};
@@ -257,6 +258,130 @@ pub fn resolve_cached_bundles(
     }
 
     resolved_bundles
+}
+
+/// One `--override-bundle BNDLID=PATH` entry that could not be applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BundleOverrideProblem {
+    /// No discovered bundle's `namespace:name` matched this `bndlid`.
+    NotFound { bndlid: String },
+    /// The override path doesn't exist or isn't a valid bundle root (no
+    /// `.envoy/` directory), so the original bundle was left unsubstituted.
+    InvalidPath { bndlid: String, path: PathBuf },
+}
+
+impl BundleOverrideProblem {
+    /// Return the `bndlid` this problem is about.
+    pub fn bndlid(&self) -> &str {
+        match self {
+            BundleOverrideProblem::NotFound { bndlid }
+            | BundleOverrideProblem::InvalidPath { bndlid, .. } => bndlid,
+        }
+    }
+}
+
+impl fmt::Display for BundleOverrideProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BundleOverrideProblem::NotFound { bndlid } => {
+                write!(formatter, "'{bndlid}' does not match any discovered bundle")
+            }
+            BundleOverrideProblem::InvalidPath { bndlid, path } => write!(
+                formatter,
+                "'{bndlid}' override path is not a valid bundle root (must be a directory containing .envoy/): {}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// Substitute a local checkout path for one or more already-discovered
+/// bundles, keyed by `namespace:name` (bndlid). Implements `envoy
+/// --override-bundle BNDLID=PATH`.
+///
+/// Only ever swaps the root path of a bundle that's already present in
+/// `bundles` -- it never injects a bundle that wasn't already discovered by
+/// the resolved Stack or bundle-root discovery. Intended to run after that
+/// discovery (and after [`resolve_cached_bundles`], if used) and before
+/// command-registry loading.
+///
+/// `overrides` may repeat the same `bndlid`; the *last* occurrence wins,
+/// matching the last-one-wins convention already used elsewhere for
+/// conflicting envoy bundle/command sources (see
+/// [`crate::commands::CommandRegistry::load_from_bundles`]'s command-name
+/// overwrite).
+///
+/// Returns the (possibly substituted) bundle list alongside every problem
+/// encountered -- an override that matched no discovered bundle, or whose
+/// path isn't a valid bundle root -- in the order those `bndlid`s first
+/// appeared in `overrides`, so a caller can report every problem in one
+/// pass instead of just the first. A bundle whose override path is invalid
+/// is left unsubstituted (not dropped), matching this function's principle
+/// of never silently discarding a caller's discovered bundles.
+pub fn apply_bundle_overrides(
+    bundles: Vec<BundleInfo>,
+    overrides: &[(String, PathBuf)],
+) -> (Vec<BundleInfo>, Vec<BundleOverrideProblem>) {
+    if overrides.is_empty() {
+        return (bundles, Vec::new());
+    }
+
+    let mut order: Vec<&str> = Vec::new();
+    let mut by_bndlid: HashMap<&str, &Path> = HashMap::new();
+    for (bndlid, path) in overrides {
+        if by_bndlid.insert(bndlid.as_str(), path.as_path()).is_none() {
+            order.push(bndlid.as_str());
+        }
+    }
+
+    let mut problems_by_bndlid: HashMap<String, BundleOverrideProblem> = HashMap::new();
+    let mut applied: HashSet<String> = HashSet::new();
+
+    let resolved_bundles: Vec<BundleInfo> = bundles
+        .into_iter()
+        .map(|bundle| {
+            let bndlid = bundle.bndlid();
+            let Some(path) = by_bndlid.get(bndlid.as_str()).copied() else {
+                return bundle;
+            };
+
+            applied.insert(bndlid.clone());
+
+            if validate_bundle(path) {
+                BundleInfo::new(
+                    path.to_path_buf(),
+                    bundle.name.clone(),
+                    bundle.namespace.clone(),
+                )
+            } else {
+                problems_by_bndlid.insert(
+                    bndlid.clone(),
+                    BundleOverrideProblem::InvalidPath {
+                        bndlid,
+                        path: path.to_path_buf(),
+                    },
+                );
+                bundle
+            }
+        })
+        .collect();
+
+    for bndlid in &order {
+        if !applied.contains(*bndlid) {
+            problems_by_bndlid
+                .entry((*bndlid).to_string())
+                .or_insert_with(|| BundleOverrideProblem::NotFound {
+                    bndlid: (*bndlid).to_string(),
+                });
+        }
+    }
+
+    let problems = order
+        .into_iter()
+        .filter_map(|bndlid| problems_by_bndlid.remove(bndlid))
+        .collect();
+
+    (resolved_bundles, problems)
 }
 
 /// Try to fill a published bundle cache miss from the team bundle root.
@@ -576,9 +701,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        collect_env_files, envoy_program_names, is_raw_path, load_registry, prepare_env,
-        python_program_names, resolve_cached_bundles, resolve_envoy_exe_from,
-        resolve_team_config_for_bundles,
+        apply_bundle_overrides, collect_env_files, envoy_program_names, is_raw_path, load_registry,
+        prepare_env, python_program_names, resolve_cached_bundles, resolve_envoy_exe_from,
+        resolve_team_config_for_bundles, BundleOverrideProblem,
     };
     use crate::bundle_cache::BundleCache;
     use crate::commands::CommandRegistry;
@@ -1338,5 +1463,134 @@ be substituted with the cached path"
             .resolve(&checkout.bndlid(), &any_version_spec())
             .expect("cache lookup should succeed")
             .is_none());
+    }
+
+    #[test]
+    fn apply_bundle_overrides_is_a_noop_with_no_overrides() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let bundle = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+
+        let (resolved, problems) = apply_bundle_overrides(vec![bundle.clone()], &[]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].root, bundle.root);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn apply_bundle_overrides_substitutes_the_matching_bundles_root() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let original = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+        let unrelated = bundle_with_file(temp_dir.path(), "gt", "unreal", "commands.json", "{}");
+        let override_root = temp_dir.path().join("dev_checkout");
+        fs::create_dir_all(override_root.join(".envoy")).expect(".envoy dir should be created");
+
+        let (resolved, problems) = apply_bundle_overrides(
+            vec![original.clone(), unrelated.clone()],
+            &[("gt:maya".to_string(), override_root.clone())],
+        );
+
+        assert!(problems.is_empty());
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].root, override_root);
+        assert_eq!(resolved[0].name, original.name);
+        assert_eq!(resolved[0].namespace, original.namespace);
+        // The unrelated bundle must be untouched.
+        assert_eq!(resolved[1].root, unrelated.root);
+    }
+
+    #[test]
+    fn apply_bundle_overrides_repeated_bndlid_uses_the_last_path() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let original = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+        let first_override = temp_dir.path().join("first");
+        let second_override = temp_dir.path().join("second");
+        fs::create_dir_all(first_override.join(".envoy")).expect(".envoy dir should be created");
+        fs::create_dir_all(second_override.join(".envoy")).expect(".envoy dir should be created");
+
+        let (resolved, problems) = apply_bundle_overrides(
+            vec![original],
+            &[
+                ("gt:maya".to_string(), first_override),
+                ("gt:maya".to_string(), second_override.clone()),
+            ],
+        );
+
+        assert!(problems.is_empty());
+        assert_eq!(resolved[0].root, second_override);
+    }
+
+    #[test]
+    fn apply_bundle_overrides_reports_an_unmatched_bndlid() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let original = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+        let override_root = temp_dir.path().join("dev_checkout");
+        fs::create_dir_all(override_root.join(".envoy")).expect(".envoy dir should be created");
+
+        let (resolved, problems) = apply_bundle_overrides(
+            vec![original.clone()],
+            &[("gt:does-not-exist".to_string(), override_root)],
+        );
+
+        // The bundle that WAS discovered must be left untouched, not dropped.
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].root, original.root);
+        assert_eq!(problems.len(), 1);
+        assert_eq!(
+            problems[0],
+            BundleOverrideProblem::NotFound {
+                bndlid: "gt:does-not-exist".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn apply_bundle_overrides_reports_an_invalid_override_path_and_keeps_the_original() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let original = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+        // No .envoy/ directory under this path -- not a valid bundle root.
+        let not_a_bundle = temp_dir.path().join("just_a_folder");
+        fs::create_dir_all(&not_a_bundle).expect("plain dir should be created");
+
+        let (resolved, problems) = apply_bundle_overrides(
+            vec![original.clone()],
+            &[("gt:maya".to_string(), not_a_bundle.clone())],
+        );
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].root, original.root,
+            "an invalid override path must not replace the original bundle"
+        );
+        assert_eq!(
+            problems,
+            vec![BundleOverrideProblem::InvalidPath {
+                bndlid: "gt:maya".to_string(),
+                path: not_a_bundle,
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_bundle_overrides_reports_problems_in_first_seen_argument_order() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let maya = bundle_with_file(temp_dir.path(), "gt", "maya", "commands.json", "{}");
+
+        let (_, problems) = apply_bundle_overrides(
+            vec![maya],
+            &[
+                ("gt:zzz-not-found".to_string(), temp_dir.path().join("zzz")),
+                ("gt:aaa-not-found".to_string(), temp_dir.path().join("aaa")),
+            ],
+        );
+
+        assert_eq!(
+            problems
+                .iter()
+                .map(BundleOverrideProblem::bndlid)
+                .collect::<Vec<_>>(),
+            vec!["gt:zzz-not-found", "gt:aaa-not-found"],
+            "problems should be reported in the order the overrides were given, not sorted"
+        );
     }
 }

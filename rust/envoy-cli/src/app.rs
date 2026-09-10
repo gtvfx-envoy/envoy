@@ -12,7 +12,7 @@ use envoy_core::error::EnvoyError;
 use envoy_core::executor::ProcessExecutor;
 use envoy_core::models::WrapperConfig;
 use envoy_core::runtime::{
-    collect_env_files, is_raw_path, prepare_env, resolve_cached_bundles,
+    apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env, resolve_cached_bundles,
     resolve_team_config_for_bundles,
 };
 use envoy_core::stack::{Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_SETTING};
@@ -440,6 +440,15 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
 fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32> {
     let mut registry = CommandRegistry::empty();
     let mut bundles = None;
+
+    let bundle_overrides = match parse_bundle_overrides(&cli.override_bundle) {
+        Ok(overrides) => overrides,
+        Err(message) => {
+            eprintln!("Error: {message}");
+            return Err(1);
+        }
+    };
+
     let selected_stack = if let Some(raw_value) = cli.stack.as_deref() {
         Some(resolve_stack_value(raw_value, verbose)?)
     } else {
@@ -475,6 +484,8 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
                         bundle_cache.as_mut(),
                         team_config.as_ref(),
                     );
+                    let discovered_bundles =
+                        apply_overrides_or_bail(discovered_bundles, &bundle_overrides)?;
                     debug(
                         verbose,
                         &format!(
@@ -518,6 +529,8 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
                     bundle_cache.as_mut(),
                     team_config.as_ref(),
                 );
+                let discovered_bundles =
+                    apply_overrides_or_bail(discovered_bundles, &bundle_overrides)?;
                 debug(
                     verbose,
                     &format!("Auto-discovered {} bundle(s)", discovered_bundles.len()),
@@ -565,6 +578,14 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
         }
     }
 
+    if !bundle_overrides.is_empty() && bundles.is_none() {
+        eprintln!(
+            "Error: --override-bundle requires bundles discovered via a Stack or \
+ENVOY_BNDL_ROOTS; none were found"
+        );
+        return Err(1);
+    }
+
     if verbose {
         if let Some(team) = resolve_team_config_for_bundles(bundles.as_deref()) {
             debug(verbose, &format!("Resolved team config: {}", team.name));
@@ -579,6 +600,56 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
         bundles,
         stack: selected_stack,
     })
+}
+
+/// Parse every `--override-bundle BNDLID=PATH` value into `(bndlid, path)`
+/// pairs, or return a single human-readable error for the first malformed
+/// entry.
+fn parse_bundle_overrides(raw_values: &[String]) -> Result<Vec<(String, PathBuf)>, String> {
+    let mut overrides = Vec::with_capacity(raw_values.len());
+
+    for raw in raw_values {
+        let Some((bndlid, path)) = raw.split_once('=') else {
+            return Err(format!(
+                "Invalid --override-bundle value {raw:?}: expected BNDLID=PATH"
+            ));
+        };
+        let bndlid = bndlid.trim();
+        let path = path.trim();
+        if bndlid.is_empty() || path.is_empty() {
+            return Err(format!(
+                "Invalid --override-bundle value {raw:?}: expected BNDLID=PATH"
+            ));
+        }
+
+        overrides.push((bndlid.to_string(), PathBuf::from(path)));
+    }
+
+    Ok(overrides)
+}
+
+/// Apply `--override-bundle` overrides to a freshly discovered bundle list,
+/// printing every problem and returning `Err(1)` if any override didn't
+/// match a discovered bundle or pointed at an invalid bundle path.
+///
+/// A no-op (returns `bundles` unchanged) when `overrides` is empty, so
+/// callers can apply this unconditionally right after bundle discovery
+/// without a separate "were overrides requested" check.
+fn apply_overrides_or_bail(
+    bundles: Vec<BundleInfo>,
+    overrides: &[(String, PathBuf)],
+) -> Result<Vec<BundleInfo>, i32> {
+    let (resolved, problems) = apply_bundle_overrides(bundles, overrides);
+    if problems.is_empty() {
+        return Ok(resolved);
+    }
+
+    eprintln!("Error: --override-bundle problem(s):");
+    for problem in &problems {
+        eprintln!("  {problem}");
+    }
+    eprintln!("Run 'envoy --diagnose' to see discovered bundles");
+    Err(1)
 }
 
 fn resolve_stack_value(raw: &str, verbose: bool) -> Result<Stack, i32> {
