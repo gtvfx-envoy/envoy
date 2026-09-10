@@ -288,7 +288,7 @@ impl fmt::Display for BundleOverrideProblem {
             }
             BundleOverrideProblem::InvalidPath { bndlid, path } => write!(
                 formatter,
-                "'{bndlid}' override path is not a valid bundle (missing .envoy/): {}",
+                "'{bndlid}' override path is not a valid bundle root (must be a directory containing .envoy/): {}",
                 path.display()
             ),
         }
