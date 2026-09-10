@@ -1,0 +1,30 @@
+# Code owners for envoy.
+#
+# This repository currently has a single maintainer, so every path below
+# resolves to the same owner today. It is still organized by subsystem
+# rather than collapsed into one catch-all line, so that adding a second
+# reviewer for a specific area later is a small, additive diff instead of a
+# rewrite. Owners are consulted (not necessarily required) for review;
+# review requirements are configured separately via branch protection.
+#
+# Order matters: GitHub uses the last matching pattern, so more specific
+# paths are listed after the broader defaults they refine.
+
+# Default owner for anything not matched below.
+*                           @gtvfx
+
+# Core Rust implementation (CLI, runtime, contract tests).
+/rust/                      @gtvfx
+
+# Build, packaging, and release tooling.
+/scripts/                   @gtvfx
+
+# CI/CD workflows and repository automation.
+/.github/                   @gtvfx
+
+# Documentation.
+/docs/                      @gtvfx
+/README.md                  @gtvfx
+
+# Tests.
+/tests/                     @gtvfx
