@@ -53,6 +53,15 @@ recursive-trigger restriction, so no additional App permission is needed for
 this. Leave it unset (the default) to keep downstream release preparation
 manually triggered.
 
+**Do not enable `RELEASE_AUTOMATION_AUTO_PREPARE` until Envoy Utils has
+published a release that provides `engit release-train`.** Envoy Utils'
+own impact workflow is unaffected (it builds `engit` from source in the
+same run), but Despatch's equivalent workflow downloads a released `engit`
+and requires the `ENGIT_RELEASE_TRAIN_VERSION` repository variable to be
+set to that release's version first -- it fails fast with an explicit error
+if enabled before that variable is set, rather than failing cryptically
+partway through.
+
 ## Release and compatibility states
 
 Automated downstream checks use three states:
@@ -89,10 +98,13 @@ Despatch before it is even committed, let alone tagged? From an `envoy_utils`
 checkout, `engit dev link rust <path-to-envoy-checkout>` points the
 `envoy-core` Cargo dependency at that local checkout (reversible with
 `engit dev unlink rust`); `engit dev link python <path-to-envoy-checkout>`
-builds an isolated dev bundle for Envoy's Python API. Add the printed bundle
-directory's parent to `ENVOY_BNDL_ROOTS` (or reference the bundle directly)
-before testing against Despatch. Never commit a workspace in a dev-linked
-state -- `lint.yml` fails fast if `rust/Cargo.toml` is left pointing at a local path.
+builds an isolated dev bundle for Envoy's Python API. If Despatch has an
+Envoy Stack active, add the printed bundle path directly to it -- Envoy
+resolves bundles from the active Stack and does not consult
+`ENVOY_BNDL_ROOTS` while one is set; otherwise add its parent directory to
+`ENVOY_BNDL_ROOTS` (or reference the bundle directly). Never commit a
+workspace in a dev-linked state -- `lint.yml` fails fast if
+`rust/Cargo.toml` is left pointing at a local path.
 
 For Envoy Utils, run the preparation command from the `envoy_utils` checkout.
 It updates the workspace version, sets the Envoy Core tag and exact crate
@@ -184,7 +196,7 @@ the tracked issue noting it. This only ever triggers the same, unmodified
 workflow described below: it still runs full validation and opens a draft
 pull request for the normal review-and-merge process below. `required`
 classifications are never auto-dispatched. Leave the variable unset (the
-default) to keep this fully manual.
+default) to keep downstream release preparation manually triggered.
 
 Either way, the same computation is available on demand from any `envoy_utils`
 checkout: `engit release-train prepare-downstream --repo <envoy_utils|despatch>
