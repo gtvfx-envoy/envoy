@@ -50,7 +50,7 @@ automatically dispatch that repository's own Prepare Release workflow (see
 `GITHUB_TOKEN` with an `actions: write` permission -- dispatching a
 repository's own `workflow_dispatch` event is exempt from the usual token
 recursive-trigger restriction, so no additional App permission is needed for
-this. Leave it unset (the default) to keep every release-train stage
+this. Leave it unset (the default) to keep downstream release preparation
 manually triggered.
 
 ## Release and compatibility states
