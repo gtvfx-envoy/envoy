@@ -89,9 +89,10 @@ Despatch before it is even committed, let alone tagged? From an `envoy_utils`
 checkout, `engit dev link rust <path-to-envoy-checkout>` points the
 `envoy-core` Cargo dependency at that local checkout (reversible with
 `engit dev unlink rust`); `engit dev link python <path-to-envoy-checkout>`
-does the same for Envoy's Python API via an isolated dev bundle, for testing
-against Despatch. Never commit a workspace in a dev-linked state --
-`lint.yml` fails fast if `rust/Cargo.toml` is left pointing at a local path.
+builds an isolated dev bundle for Envoy's Python API. Add the printed bundle
+directory's parent to `ENVOY_BNDL_ROOTS` (or reference the bundle directly)
+before testing against Despatch. Never commit a workspace in a dev-linked
+state -- `lint.yml` fails fast if `rust/Cargo.toml` is left pointing at a local path.
 
 For Envoy Utils, run the preparation command from the `envoy_utils` checkout.
 It updates the workspace version, sets the Envoy Core tag and exact crate
