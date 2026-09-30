@@ -105,7 +105,9 @@ fn is_stack_name(value: &str) -> bool {
 /// Resolve a named stack to the path of its latest version.
 ///
 /// Searches each directory in ``ENVOY_STACK_ROOTS`` for a subdirectory named
-/// ``name`` that contains a ``latest.estack`` symlink. Returns the first match.
+/// ``name``. Envoy prefers a valid ``latest.estack`` symlink when present and
+/// otherwise falls back to the published version whose ``.estack`` file has
+/// the newest modified time. Returns the first match.
 ///
 /// Args:
 ///     name: Stack name to resolve (for example ``'studio'``).
@@ -121,9 +123,10 @@ fn resolve_named_stack(py: Python<'_>, name: &str) -> PyResult<Option<PyObject>>
 
 /// List all available named stacks across all ``ENVOY_STACK_ROOTS`` roots.
 ///
-/// Scans each stack root for named subdirectories that have a
-/// ``latest.estack`` symlink. Deduplicates by name — the first root that
-/// defines a given
+/// Scans each stack root for named subdirectories. For each name, envoy
+/// prefers a valid ``latest.estack`` symlink when present and otherwise falls
+/// back to the published version whose ``.estack`` file has the newest
+/// modified time. Deduplicates by name — the first root that defines a given
 /// name wins, matching :func:`resolveNamedStack`.
 ///
 /// Returns:

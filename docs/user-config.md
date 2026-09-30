@@ -136,9 +136,10 @@ Context lookup is not performed when no context is supplied.
 ## Named stacks
 
 A named Stack (for example, `studio`) is a slot stored under
-`ENVOY_STACK_ROOTS` with versioned history and a `latest.estack` symlink. This lets
-teams publish and update a shared runtime environment without distributing a
-specific file path.
+`ENVOY_STACK_ROOTS` with versioned history. Envoy prefers a `latest.estack`
+symlink when present and otherwise falls back to the newest published version
+by modified time. This lets teams publish and update a shared runtime
+environment without distributing a specific file path.
 
 ### How envoy tells names from paths
 
@@ -179,22 +180,23 @@ colon-separated on Unix).  Envoy scans each root for named stack slots.
 ```
 R:\studio\envoy\stack\
 └── studio\
-    ├── 2026-06-21T10-13-00\
+    ├── 2026-06-21-101300\
     │   └── studio.estack            ← versioned Stack
-    ├── 2026-06-22T09-00-00\
+    ├── 2026-06-22-090000\
     │   └── studio.estack            ← newer version
-    └── latest.estack                → 2026-06-22T09-00-00\studio.estack
+    └── latest.estack                → 2026-06-22-090000\studio.estack  (optional)
 ```
 
 Each version is a timestamped directory containing an `.estack` file named for
-the stack. `latest.estack` is a relative symlink to the most recently published
-version.
+the stack. When present, `latest.estack` is a relative symlink to the preferred
+published version. If it is absent, envoy automatically resolves the newest
+published version by modified time.
 
 ### Publishing a named Stack
 
 Use
 [`engit publish stack`](https://github.com/gtvfx-envoy/envoy_utils/blob/main/docs/cli-reference/engit.md#engit-publish-stack)
-from Envoy Utils to publish a new version and update `latest.estack`:
+from Envoy Utils to publish a new immutable version:
 
 ```powershell
 engit publish stack V:/repo/gtvfx-envoy/stacks/studio/studio.estack
@@ -205,6 +207,9 @@ With an explicit stack root (instead of using `ENVOY_STACK_PUBLISH_ROOT`):
 ```powershell
 engit publish stack V:/repo/gtvfx-envoy/stacks/studio/studio.estack --output R:/studio/envoy/stack
 ```
+
+When no `latest.estack` symlink is present, envoy resolves the newest
+published version automatically by modified time.
 
 Dry-run to preview without writing:
 

@@ -2,25 +2,28 @@
 //!
 //! Discovers versioned bundle-stack files stored in one or more *stack root*
 //! directories. Each named stack lives in its own subdirectory and is
-//! versioned by timestamp, with a `latest.estack` symlink that points to the
-//! most recently published version.
+//! versioned by timestamp. When `latest.estack` is present, envoy prefers that
+//! symlink; otherwise it falls back to the newest published version by
+//! modified time.
 //!
 //! Directory layout under a stack root:
 //!
 //! ```text
 //! <stack-root>/
 //! └── studio/
-//!     ├── 2026-06-21T10-13-00/
+//!     ├── 2026-06-21-101300/
 //!     │   └── studio.estack
-//!     ├── 2026-06-22T09-00-00/
+//!     ├── 2026-06-22-090000/
 //!     │   └── studio.estack
-//!     └── latest.estack -> 2026-06-22T09-00-00/studio.estack
+//!     └── latest.estack -> 2026-06-22-090000/studio.estack
 //! ```
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 /// Environment variable containing the stack root directories.
 ///
@@ -128,9 +131,14 @@ fn published_stack(name_dir: &Path, name: &str, version_dir: &Path) -> Option<Pa
 
 fn latest_stack(name_dir: &Path, name: &str) -> Option<(String, PathBuf)> {
     let name_dir = fs::canonicalize(name_dir).ok()?;
+    latest_stack_via_symlink(&name_dir, name)
+        .or_else(|| latest_stack_via_modified_time(&name_dir, name))
+}
+
+fn latest_stack_via_symlink(name_dir: &Path, name: &str) -> Option<(String, PathBuf)> {
     let stack_path = fs::canonicalize(name_dir.join(LATEST_FILE)).ok()?;
     let version_dir = stack_path.parent()?;
-    if version_dir.parent() != Some(name_dir.as_path())
+    if version_dir.parent() != Some(name_dir)
         || stack_path.file_name() != Some(OsStr::new(&format!("{name}.estack")))
     {
         return None;
@@ -138,6 +146,37 @@ fn latest_stack(name_dir: &Path, name: &str) -> Option<(String, PathBuf)> {
 
     let version = version_dir.file_name()?.to_str()?.to_string();
     Some((version, stack_path))
+}
+
+fn latest_stack_via_modified_time(name_dir: &Path, name: &str) -> Option<(String, PathBuf)> {
+    let mut latest: Option<(String, PathBuf, SystemTime)> = None;
+
+    for version_dir in sorted_dir_paths(name_dir) {
+        let Some(stack_path) = published_stack(name_dir, name, &version_dir) else {
+            continue;
+        };
+        let Some(version) = version_dir.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let Ok(modified) = fs::metadata(&stack_path).and_then(|meta| meta.modified()) else {
+            continue;
+        };
+
+        let is_newer = match &latest {
+            None => true,
+            Some((best_version, _, best_modified)) => match modified.partial_cmp(best_modified) {
+                Some(Ordering::Greater) => true,
+                Some(Ordering::Less) => false,
+                Some(Ordering::Equal) | None => version > best_version.as_str(),
+            },
+        };
+
+        if is_newer {
+            latest = Some((version.to_string(), stack_path, modified));
+        }
+    }
+
+    latest.map(|(version, stack_path, _)| (version, stack_path))
 }
 
 /// Return `true` if `value` looks like a named stack rather than a path.
@@ -168,8 +207,9 @@ pub fn is_stack_name(value: &str) -> bool {
 /// Resolve a named stack to the path of its latest version.
 ///
 /// Searches each directory in `ENVOY_STACK_ROOTS` for a subdirectory named
-/// `name` that contains a valid `latest.estack` symlink. Returns the first
-/// match.
+/// `name`. Envoy prefers a valid `latest.estack` symlink when present and
+/// otherwise falls back to the published version whose `.estack` file has the
+/// newest modified time. Returns the first match.
 pub fn resolve_named_stack(name: &str) -> Option<PathBuf> {
     for root in stack_roots() {
         let name_dir = root.join(name);
@@ -186,6 +226,11 @@ pub fn resolve_named_stack(name: &str) -> Option<PathBuf> {
 }
 
 /// List all available named stacks across all `ENVOY_STACK_ROOTS` roots.
+///
+/// Scans each stack root for named subdirectories. For each name, envoy
+/// prefers a valid `latest.estack` symlink when present and otherwise falls
+/// back to the published version whose `.estack` file has the newest modified
+/// time.
 ///
 /// Deduplicates by name — the first root that defines a given name wins.
 /// Returns entries sorted by name.
@@ -262,8 +307,9 @@ pub fn list_stack_versions(name: &str) -> Vec<(String, PathBuf)> {
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
-    use std::fs;
+    use std::fs::{self, File};
     use std::path::Path;
+    use std::time::{Duration, SystemTime};
 
     use tempfile::tempdir;
 
@@ -339,6 +385,27 @@ mod tests {
         )
     }
 
+    fn write_named_stack_versions(root: &Path, name: &str, versions: &[(&str, &str)]) {
+        let name_dir = root.join(name);
+        fs::create_dir_all(&name_dir).expect("failed to create named stack directory");
+
+        for (version, contents) in versions {
+            let version_dir = name_dir.join(version);
+            fs::create_dir_all(&version_dir).expect("failed to create stack version directory");
+            fs::write(version_dir.join(format!("{name}.estack")), contents)
+                .expect("failed to write versioned stack");
+        }
+    }
+
+    fn set_stack_modified_time(path: &Path, modified: SystemTime) {
+        File::options()
+            .write(true)
+            .open(path)
+            .expect("failed to open stack file for modified-time update")
+            .set_modified(modified)
+            .expect("failed to set stack file modified time");
+    }
+
     fn join_roots(roots: &[&Path]) -> OsString {
         std::env::join_paths(roots).expect("failed to join stack roots")
     }
@@ -400,6 +467,77 @@ mod tests {
                 .join("studio.estack"),
         )
         .expect("failed to canonicalize published path");
+
+        with_stack_roots_env(Some(roots.as_os_str()), || {
+            assert_eq!(resolve_named_stack("studio"), Some(expected_path));
+        });
+    }
+
+    #[test]
+    fn resolve_named_stack_falls_back_to_newest_modified_time_when_no_symlink() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let stack_root = temp.path().join("stack-root");
+        write_named_stack_versions(
+            &stack_root,
+            "studio",
+            &[
+                ("2026-01-01-000000", "{\"version\":\"older-name\"}"),
+                ("2026-12-31-235959", "{\"version\":\"newer-name\"}"),
+            ],
+        );
+
+        let newer_path = stack_root
+            .join("studio")
+            .join("2026-01-01-000000")
+            .join("studio.estack");
+        let older_path = stack_root
+            .join("studio")
+            .join("2026-12-31-235959")
+            .join("studio.estack");
+        let now = SystemTime::now();
+        let one_hour_ago = now - Duration::from_secs(3600);
+
+        set_stack_modified_time(&newer_path, now);
+        set_stack_modified_time(&older_path, one_hour_ago);
+
+        let roots = join_roots(&[stack_root.as_path()]);
+        let expected_path =
+            fs::canonicalize(&newer_path).expect("failed to canonicalize newest stack path");
+
+        with_stack_roots_env(Some(roots.as_os_str()), || {
+            assert_eq!(resolve_named_stack("studio"), Some(expected_path));
+        });
+    }
+
+    #[test]
+    fn resolve_named_stack_ties_break_by_version_name_when_no_symlink() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let stack_root = temp.path().join("stack-root");
+        write_named_stack_versions(
+            &stack_root,
+            "studio",
+            &[
+                ("2026-06-21-101300", "{\"version\":\"older\"}"),
+                ("2026-06-22-090000", "{\"version\":\"newer\"}"),
+            ],
+        );
+
+        let first_path = stack_root
+            .join("studio")
+            .join("2026-06-21-101300")
+            .join("studio.estack");
+        let second_path = stack_root
+            .join("studio")
+            .join("2026-06-22-090000")
+            .join("studio.estack");
+        let shared_modified = SystemTime::now();
+
+        set_stack_modified_time(&first_path, shared_modified);
+        set_stack_modified_time(&second_path, shared_modified);
+
+        let roots = join_roots(&[stack_root.as_path()]);
+        let expected_path =
+            fs::canonicalize(&second_path).expect("failed to canonicalize tied stack path");
 
         with_stack_roots_env(Some(roots.as_os_str()), || {
             assert_eq!(resolve_named_stack("studio"), Some(expected_path));
