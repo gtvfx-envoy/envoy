@@ -12,8 +12,8 @@ flowchart LR
     ER --> DC["Despatch compatibility check"]
     UC --> UI["Review or required issue"]
     DC --> DI["Review or required issue"]
-    UI --> UP["Envoy Utils Prepare Release"]
-    DI --> DP["Despatch Prepare Release"]
+    UI -->|"maintainer decision, or automatic on review"| UP["Envoy Utils Prepare Release"]
+    DI -->|"maintainer decision, or automatic on review"| DP["Despatch Prepare Release"]
 ```
 
 ## One-time organization setup
@@ -42,6 +42,25 @@ normally but do not dispatch downstream assessments.
 
 The App token is used only in trusted manual and release workflows. Pull
 request compatibility checks use read-only repository credentials.
+
+Optionally set the `RELEASE_AUTOMATION_AUTO_PREPARE` repository variable to
+`true` in Envoy Utils and/or Despatch to let a `review`-classified impact run
+automatically dispatch that repository's own Prepare Release workflow (see
+"Review downstream impact" below). This uses each workflow's own
+`GITHUB_TOKEN` with an `actions: write` permission -- dispatching a
+repository's own `workflow_dispatch` event is exempt from the usual token
+recursive-trigger restriction, so no additional App permission is needed for
+this. Leave it unset (the default) to keep downstream release preparation
+manually triggered.
+
+**Do not enable `RELEASE_AUTOMATION_AUTO_PREPARE` until Envoy Utils has
+published a release that provides `engit release-train`.** Envoy Utils'
+own impact workflow is unaffected (it builds `engit` from source in the
+same run), but Despatch's equivalent workflow downloads a released `engit`
+and requires the `ENGIT_RELEASE_TRAIN_VERSION` repository variable to be
+set to that release's version first -- it fails fast with an explicit error
+if enabled before that variable is set, rather than failing cryptically
+partway through.
 
 ## Release and compatibility states
 
@@ -73,6 +92,19 @@ prerelease SemVer values are accepted.
 
 The release workflows repeat these checks in CI, but running them locally makes
 failures easier to diagnose before creating a tag.
+
+Iterating on an Envoy change and want to test it against Envoy Utils or
+Despatch before it is even committed, let alone tagged? From an `envoy_utils`
+checkout, `engit dev link rust <path-to-envoy-checkout>` points the
+`envoy-core` Cargo dependency at that local checkout (reversible with
+`engit dev unlink rust`); `engit dev link python <path-to-envoy-checkout>`
+builds an isolated dev bundle for Envoy's Python API. If Despatch has an
+Envoy Stack active, add the printed bundle path directly to it -- Envoy
+resolves bundles from the active Stack and does not consult
+`ENVOY_BNDL_ROOTS` while one is set; otherwise add its parent directory to
+`ENVOY_BNDL_ROOTS` (or reference the bundle directly). Never commit a
+workspace in a dev-linked state -- `lint.yml` fails fast if
+`rust/Cargo.toml` is left pointing at a local path.
 
 For Envoy Utils, run the preparation command from the `envoy_utils` checkout.
 It updates the workspace version, sets the Envoy Core tag and exact crate
@@ -155,6 +187,22 @@ For `none`, the Actions summary records the decision and no issue is created.
 For `review`, choose whether the new linked or embedded behavior is useful to
 consumers. For `required`, update the downstream source as necessary before
 preparing its release.
+
+When a repository's `RELEASE_AUTOMATION_AUTO_PREPARE` variable is `true`
+(see "One-time organization setup" above), a `review` classification also
+automatically dispatches that repository's own step 4 or 5 Prepare Release
+below, using a patch-bumped version and the new Envoy pin, and comments on
+the tracked issue noting it. This only ever triggers the same, unmodified
+workflow described below: it still runs full validation and opens a draft
+pull request for the normal review-and-merge process below. `required`
+classifications are never auto-dispatched. Leave the variable unset (the
+default) to keep downstream release preparation manually triggered.
+
+Either way, the same computation is available on demand from any `envoy_utils`
+checkout: `engit release-train prepare-downstream --repo <envoy_utils|despatch>
+--envoy-version <version>` (add `--dry-run` to preview the resulting `gh`
+invocation without dispatching anything). `engit release-train status` prints
+each repository's latest release and open impact issues in one place.
 
 Envoy Utils and Despatch do not depend on each other and may proceed in
 parallel.
@@ -243,7 +291,10 @@ version for replay after a runner or external service failure.
 - [ ] The Envoy preparation pull request passed normal and advisory checks.
 - [ ] Envoy **Tag Release** published all archives, wheels, and checksums.
 - [ ] Envoy Utils and Despatch impact workflows completed or were replayed.
-- [ ] Every `review` or `required` issue has an explicit maintainer decision.
+- [ ] Every `review` or `required` issue has an explicit maintainer decision,
+      including any auto-dispatched preparation pull request (review and
+      merge or close it like any other -- `RELEASE_AUTOMATION_AUTO_PREPARE`
+      only dispatches; it never merges).
 - [ ] Needed downstream preparation pull requests passed and were merged.
 - [ ] Needed downstream releases were tagged through **Tag Release**.
 - [ ] Envoy Utils release notes and `compatibility.json` agree.
