@@ -1,0 +1,38 @@
+name: pve04 runner validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-lint:
+    name: Python lint on pve04
+    runs-on: [self-hosted, Linux, X64, debian-13, ci]
+    timeout-minutes: 15
+
+    steps:
+      - name: Verify expected runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Runner: %s\n' "$RUNNER_NAME"
+          test "$RUNNER_NAME" = gha-linux-01
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11.9
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11.9"
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+
+      - name: Run ruff check
+        run: ruff check scripts rust/envoy-py/python rust/envoy-py/tests
+
+      - name: Run ruff format --check
+        run: ruff format --check scripts rust/envoy-py/python rust/envoy-py/tests
