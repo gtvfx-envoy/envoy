@@ -38,3 +38,42 @@ jobs:
       - name: Run ruff format --check
         if: ${{ !cancelled() && steps.install_ruff.outcome == 'success' }}
         run: ruff format --check scripts rust/envoy-py/python rust/envoy-py/tests
+
+  rust:
+    name: Rust checks on pve04
+    needs: python-lint
+    runs-on: [self-hosted, Linux, X64, debian-13, ci]
+    timeout-minutes: 30
+
+    steps:
+      - name: Verify expected runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Runner: %s\n' "$RUNNER_NAME"
+          test "$RUNNER_NAME" = gha-linux-01
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry/build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Run cargo fmt --check
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Run cargo clippy
+        working-directory: rust
+        run: cargo clippy --workspace --exclude envoy-py --all-targets -- -D warnings
+
+      - name: Run cargo test
+        working-directory: rust
+        run: cargo test --workspace --exclude envoy-py
