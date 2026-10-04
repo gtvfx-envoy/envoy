@@ -159,7 +159,7 @@ jobs:
 
   windows:
     name: Windows x64 tests
-    runs-on: ["self-hosted", "Windows", "X64"]
+    runs-on: ["self-hosted", "Windows", "X64", "windows-11", "ci"]
 
     steps:
       - name: Checkout
