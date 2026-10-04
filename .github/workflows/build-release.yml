@@ -20,7 +20,7 @@ env:
 jobs:
   windows-x86_64:
     name: Windows x64 release
-    runs-on: [self-hosted, X64, Windows]
+    runs-on: [self-hosted, X64, Windows, windows-11, ci]
 
     steps:
       - name: Checkout
@@ -94,7 +94,7 @@ jobs:
 
   linux-x86_64:
     name: Linux x64 release
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, debian-13, ci]
 
     steps:
       - name: Checkout
