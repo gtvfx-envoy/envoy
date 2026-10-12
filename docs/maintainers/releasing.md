@@ -4,6 +4,11 @@ The three projects are independently versioned. Envoy releases are assessed
 automatically against Envoy Utils and Despatch, but maintainers decide whether
 a passing downstream project needs to be repinned and released.
 
+This page is the step-by-step procedure. [Build and Release Chain](build-chain.md)
+explains what the workflows do, [CI Runners](ci-runners.md) covers where they
+run, and [Release Troubleshooting](release-troubleshooting.md) covers failed
+runs.
+
 ```mermaid
 flowchart LR
     EP["Envoy Prepare Release"] --> ET["Envoy Tag Release"]
@@ -142,6 +147,22 @@ For Despatch, run its repository-local preparation workflow with the new
 Despatch version and Envoy version, then run the repository's lint, test, and
 executable-build checks before tagging. The release workflow performs the same
 checks on Windows and uploads the executable only after a successful build.
+
+### Rehearse the tag build
+
+A tag build runs on three operating systems, on both GitHub-hosted and
+self-hosted runners. If a workflow, a runner, or anything the release jobs
+depend on has changed since the last release, rehearse it first. A validation
+build runs the same jobs as a tag build but never publishes:
+
+```powershell
+gh workflow run "Build & Release" --repo gtvfx-envoy/envoy --ref main -f version=dev
+gh run watch --repo gtvfx-envoy/envoy
+```
+
+Every platform job must pass. Use `--ref <branch>` to rehearse a workflow change
+before merging it. See [Validation builds](build-chain.md#validation-builds).
+
 ### 1. Prepare Envoy
 
 Run **Prepare Release** in `envoy` with the new version. It opens or updates
@@ -169,8 +190,19 @@ Run **Tag Release** in `envoy` with the same version. It verifies that:
 - the tag and GitHub Release do not already exist.
 
 The workflow pushes an annotated `v<version>` tag through the GitHub App. The
-existing **Build & Release** workflow builds and tests all platforms, creates
-checksums, and publishes the GitHub Release.
+existing **Build & Release** workflow first verifies that the tag matches the
+Cargo workspace version, then builds and tests all platforms, creates checksums,
+and publishes the GitHub Release. Confirm the release has all nine expected
+assets (see [Release artifacts](build-chain.md#release-artifacts)).
+
+!!! warning "Do not create the tag or the GitHub Release by hand"
+    **Tag Release** is the only supported way to create a release tag. It checks
+    that the version was prepared and merged, that `lint.yml` passed on the exact
+    commit, and that nothing exists yet for the version. **Build & Release** then
+    creates the GitHub Release itself, but only after every platform has built. A
+    release created by hand is public immediately, before any build has run, and
+    shows as the repository's *latest* release with no assets. Envoy Utils and
+    Despatch cannot use such a release.
 
 After publication, Envoy immediately dispatches an `envoy-released` event to
 Envoy Utils and Despatch. Each repository validates the event against the
@@ -236,7 +268,9 @@ workflow.
 After review and merge, run **Tag Release** with the Despatch version. Its
 existing tag build downloads exactly one compatible Windows ABI3 Envoy wheel,
 builds the final windowed executable, runs its runtime smoke tests, and uploads
-it to the GitHub Release. Publication closes the matching impact issue.
+it to the GitHub Release. Publication closes the matching impact issue. Each
+platform job uploads its own asset as soon as it succeeds, so confirm that the
+Windows, Linux, and macOS assets are all on the release.
 
 ## Envoy Utils compatibility records
 
@@ -279,7 +313,13 @@ version for replay after a runner or external service failure.
 - A failed tag build normally does not publish a release because publication depends on
   every platform build. A later bookkeeping or issue-closing step can still fail
   after publication, so check the GitHub Release and its assets before rerunning.
-- Do not move or reuse a published tag. Fix forward with a new patch release.
+- A re-run uses the workflow files from the tagged commit. Re-run only when the
+  cause is outside the repository, such as software missing on a runner. If the
+  fix changes a file, release the next patch version instead. See
+  [Re-run or fix forward](release-troubleshooting.md#re-run-or-fix-forward).
+- Do not move or reuse a published tag. Fix forward with a new patch release. A
+  tag that has been pushed counts as published, even when its build failed or
+  its release page is empty.
 - If an Envoy release is bad, do not repin downstream projects to it. Publish a
   corrected Envoy patch first.
 - A maintainer may close a `review` issue without releasing, but should record
@@ -288,6 +328,8 @@ version for replay after a runner or external service failure.
 ## Release-train checklist
 
 - [ ] GitHub App secrets are available and downstream dispatch is enabled.
+- [ ] If workflows or runners changed since the last release, a validation build
+      of Envoy **Build & Release** passed (see "Rehearse the tag build").
 - [ ] The Envoy preparation pull request passed normal and advisory checks.
 - [ ] Envoy **Tag Release** published all archives, wheels, and checksums.
 - [ ] Envoy Utils and Despatch impact workflows completed or were replayed.

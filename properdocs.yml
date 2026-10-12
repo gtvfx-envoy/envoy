@@ -76,5 +76,9 @@ nav:
   - Examples: examples.md
   - Advanced Topics: advanced.md
   - Maintainers:
+    - Overview: maintainers/index.md
+    - Build and Release Chain: maintainers/build-chain.md
     - Releasing: maintainers/releasing.md
+    - CI Runners: maintainers/ci-runners.md
+    - Release Troubleshooting: maintainers/release-troubleshooting.md
   - Troubleshooting: troubleshooting.md

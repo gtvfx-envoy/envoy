@@ -18,8 +18,40 @@ env:
   RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
 
 jobs:
+  verify-version:
+    name: Verify release version
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # Tag Release enforces this too, but a hand-pushed tag bypasses it.
+      # Validation builds (workflow_dispatch) only check internal consistency
+      # because their version label is arbitrary.
+      - name: Check workspace version against release tag
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != push ]]; then
+            python scripts/release_automation.py check
+            exit 0
+          fi
+          release_version="${RELEASE_VERSION#v}"
+          if ! python scripts/release_automation.py check --expect-version "$release_version"; then
+            echo "::error::Tag $RELEASE_VERSION does not match the Cargo workspace version."
+            echo "Merge a Prepare Release pull request, then create the tag with Tag Release."
+            exit 1
+          fi
+
   windows-x86_64:
     name: Windows x64 release
+    needs: verify-version
     runs-on: [self-hosted, X64, Windows, windows-11, ci]
 
     steps:
@@ -94,7 +126,10 @@ jobs:
 
   linux-x86_64:
     name: Linux x64 release
-    runs-on: [self-hosted, Linux, X64, debian-13, ci]
+    needs: verify-version
+    # GitHub-hosted: the cross and manylinux2014 steps below run in Docker
+    # containers, which the self-hosted Debian CI runner does not provide.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -182,6 +217,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.target_name }} release
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
