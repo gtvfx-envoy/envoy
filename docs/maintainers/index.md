@@ -40,7 +40,7 @@ You do not need to know Rust or Python internals to run a release.
 |---|---|
 | Workflow, job, step | A workflow is one YAML file under `.github/workflows/`. It contains jobs, which run in parallel unless one declares `needs:` on another. A job is a list of steps that run in order on one machine. |
 | Runner | The machine that executes a job. **GitHub-hosted** runners (for example `ubuntu-24.04`) are fresh virtual machines with a fixed set of preinstalled tools. **Self-hosted** runners are machines we operate; they usually persist between jobs and only have the tools we install on them. |
-| Label | A tag on a runner. A job's `runs-on` list must match *every* label of the runner it is routed to. |
+| Label | A tag on a runner. A runner is eligible only if it has every label listed in the job's `runs-on`; it may have additional labels. |
 | Tag, annotated tag | A Git ref that names a commit. Release tags are annotated (they carry an author and a message) and look like `v0.7.1`. |
 | GitHub Release | The page, and the downloadable files (assets), that GitHub attaches to a tag. Users and downstream repositories install from these assets. |
 | SemVer | Semantic versioning: `MAJOR.MINOR.PATCH` with an optional `-prerelease` suffix. Workflow inputs are unprefixed (`0.7.1`); tags add a `v` (`v0.7.1`). |
