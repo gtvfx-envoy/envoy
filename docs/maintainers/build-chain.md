@@ -278,7 +278,9 @@ gh run watch --repo gtvfx-envoy/envoy
 
 ## Envoy Utils
 
-All Envoy Utils workflows run on GitHub-hosted runners.
+The Envoy Utils workflows described below run on GitHub-hosted runners. Its
+documentation deployment runs on the self-hosted Linux runner described in
+[CI Runners](ci-runners.md).
 
 | Workflow | Starts when | What it does |
 |---|---|---|
