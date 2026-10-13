@@ -263,7 +263,7 @@ shows up there as `Expected one ... found 0`.
 | `envoy --version` output | `v0.7.1` | Derived at build time from `git describe --tags`. It falls back to the Cargo version when git cannot describe the checkout, so it can look correct even when the Cargo version is wrong. |
 | Wheel version | `0.0.0` | Placeholder by design. |
 | Envoy Utils pin | `tag = "v0.7.1", version = "=0.7.1"` | Cargo refuses to resolve the pin if the tagged crate has a different version. |
-| Despatch embedded Envoy | `ENVOY_RELEASE` defaults in its release workflows | Updated by Despatch Prepare Release. |
+| Despatch embedded Envoy | `envoy-version = "0.7.1"` under `[tool.despatch]` in its `pyproject.toml` | Updated by Despatch Prepare Release. Its build jobs read it with `release_automation.py check`; no workflow file carries it. |
 
 The first three must agree. If they do not, everything downstream breaks in
 confusing ways. For example, Envoy Utils reports
@@ -292,9 +292,10 @@ label for a validation build* is the `version` input.
 - `version` is only a label (`dev` by default). Artifacts are named from it and
   stay downloadable from the run page. Leave it as `dev` unless you want to tell
   several validation runs apart.
-- Envoy Utils has the same `version` input. Despatch instead takes
-  `envoy_version`, the published Envoy version to embed, and that Envoy release
-  must already exist.
+- Envoy Utils has the same `version` input. Despatch instead takes an optional
+  `envoy_version` that overrides the Envoy version pinned in its
+  `pyproject.toml`; leave it blank to build the pinned version. A version you
+  enter must already exist as a published Envoy release.
 
 ## Envoy Utils
 
@@ -313,13 +314,18 @@ documentation deployment runs on the self-hosted Linux runner described in
 
 | Workflow | Runs on | Starts when | What it does |
 |---|---|---|---|
-| Prepare Release | Self-hosted Windows | Manual (`version`, `envoy_version`) | Installs the requested Envoy release, syncs the Despatch version and the Envoy pin, runs tests, Ruff, and format checks, and opens a draft pull request. |
+| Prepare Release | Self-hosted Windows | Manual (`version`, `envoy_version`) | Installs the requested Envoy release, syncs the Despatch version and the Envoy pin (`pyproject.toml` and `py/despatch/__init__.py` only), runs tests, Ruff, and format checks, and opens a draft pull request. |
 | Tag Release | GitHub-hosted | Manual | Same validations, then pushes the annotated tag. |
-| Build & Release | Self-hosted Windows plus GitHub-hosted Linux and macOS | Tag push, or manual validation build (`envoy_version`) | Builds, smoke-tests, and uploads the executable on each platform. |
+| Build & Release | Self-hosted Windows plus GitHub-hosted Linux and macOS | Tag push, or manual validation build (optional `envoy_version` override) | Builds, smoke-tests, and uploads the executable on each platform. |
 | Envoy Release Impact | GitHub-hosted, plus self-hosted Windows for `validate` | `envoy-released` event, or manual replay | `classify` as for Envoy Utils. `validate` runs the source tests and builds and checks the final windowed executable. `notify` creates or updates an issue labelled `dependency:envoy` and `release-impact:review` or `release-impact:required`. |
 
-Two Despatch details matter when you manage a release:
+Three Despatch details matter when you manage a release:
 
+- The Envoy version Despatch embeds is the `envoy-version` pin in its
+  `pyproject.toml`. Prepare Release edits only data files (`pyproject.toml` and
+  `py/despatch/__init__.py`) because the release App has no `workflows`
+  permission, and GitHub refuses App pushes that change a file under
+  `.github/workflows/`. Keep the pin out of workflow files for that reason.
 - The Windows jobs need the bundle location named by the `ENVOY_STUDIO_BNDLS`
   Actions variable to exist and be readable on the Windows runner.
   See [CI Runners](ci-runners.md#what-a-self-hosted-runner-must-provide).
