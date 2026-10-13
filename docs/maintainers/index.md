@@ -48,6 +48,8 @@ You do not need to know Rust or Python internals to run a release.
 | Static (musl) binary | A Linux executable with no shared-library dependencies, so one file runs on any distribution. |
 | manylinux wheel | A Linux wheel built against an old glibc inside a standard container, so it installs on older distributions. |
 | `cross` | A tool that runs `cargo` inside a prepared Docker container. Envoy uses it to produce the static Linux binary. |
-| GitHub App token | A short-lived token minted from the `gt-release-automation` GitHub App. Events created with it (for example pushing a tag) start other workflows; events created with the default `GITHUB_TOKEN` do not. |
+| GitHub App token | A short-lived token minted from the release automation GitHub App (`envoy-release-automation`). Events created with it (for example pushing a tag) start other workflows; events created with the default `GITHUB_TOKEN` do not. The runs it starts are attributed to the App's bot account, `envoy-release-automation[bot]`. |
 | `repository_dispatch` | A custom event one repository sends to another. Envoy sends `envoy-released` to Envoy Utils and Despatch after it publishes. |
-| Validation build | A manual run of **Build & Release** that builds everything but never publishes. |
+| Actions policy | An organization or repository rule (**Settings > Actions > Policies**) that limits who may trigger workflows and which events may start them. A run started by an actor the policy does not allow is rejected immediately. |
+| `startup_failure` | A run conclusion meaning GitHub rejected the run before any job existed. There are no jobs and no log, and the run cannot be re-run. See [Release Troubleshooting](release-troubleshooting.md#runs-that-never-start-startup_failure). |
+| Validation build | A manual run of **Build & Release** that builds everything but never publishes. The *Version label* it asks for is only a name used in artifact file names (default `dev`). |
