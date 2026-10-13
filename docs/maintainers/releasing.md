@@ -87,9 +87,10 @@ Automated downstream checks use three states:
 - `required`: the current downstream source fails to compile, test, package,
   or pass its runtime checks with the Envoy candidate.
 
-`required` means the compatibility command failed. It does not say why, and the
-saved result holds only an exit code. Read the failing step's log before you
-change code; see
+`required` means a compatibility check failed. It does not say why. Envoy Utils
+saves only the process exit code, while Despatch saves only per-step outcomes;
+neither captures the error text. Read the failing step's log before you change
+code; see
 [A `required` result: check the cause](release-troubleshooting.md#a-required-result-check-the-cause).
 
 Envoy Utils is tested against candidate Envoy Core on Linux and Windows.
