@@ -233,10 +233,11 @@ tag points at, or after a build has published a release; fix forward instead.
 
 ## A `required` result: check the cause
 
-An Envoy Release Impact issue labelled `release-impact:required` means the
-compatibility command **failed**. It does not say why. The saved result holds
-only the exit code (101 is Cargo's code for any failed build or test), so read
-the log before you change code.
+An Envoy Release Impact issue labelled `release-impact:required` means a
+compatibility check **failed**. It does not say why. Envoy Utils saves only the
+process exit code (101 is Cargo's code for any failed build or test), while
+Despatch saves only per-step outcomes. Neither captures the error text, so read
+the failing step's log before you change code.
 
 1. Open the validation run linked from the issue.
 2. For Envoy Utils, open the failing **Compatibility** job (Linux or Windows) and
