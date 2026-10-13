@@ -309,9 +309,10 @@ not have pinned them. The recovery was:
   `verify-version` guard, so neither failure can recur silently;
 - release again through Prepare Release and Tag Release instead of re-running.
 
-In that case the maintainers deleted the bad tag and reused `0.7.0`. That was
-safe only because the tag had no release and nothing had pinned it. The default
-remains to release the next patch version.
+In that incident the maintainers deleted the bad tag and reused `0.7.0`. Do not
+repeat that recovery: it moved and reused a tag, so it is outside the supported
+`startup_failure` exception above. Under the current policy, release the next
+patch version instead.
 
 What to take from it:
 
