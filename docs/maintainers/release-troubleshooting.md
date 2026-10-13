@@ -137,9 +137,11 @@ file is one possible cause. In this release chain the more likely cause is an
 
 ### Diagnose it
 
-1. **Rule out the workflow file.** If a
-   [validation build](build-chain.md#validation-builds) of the same workflow file
-   ran jobs, the file is valid.
+1. **Check the workflow file.** If a
+   [validation build](build-chain.md#validation-builds) of the same workflow
+   revision ran jobs, a basic syntax or registration problem is unlikely. It
+   does not rule out errors in event-specific expressions or job paths, so
+   confirm the actor pattern in the next step.
 2. **Look at who started the run.** Compare a run that failed with one that
    worked:
 
