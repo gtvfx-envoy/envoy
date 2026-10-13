@@ -24,7 +24,7 @@ flowchart LR
 ## One-time organization setup
 
 Create and install an organization GitHub App named
-`gt-release-automation` on `envoy`, `envoy_utils`, and `despatch`.
+`envoy-release-automation` on `envoy`, `envoy_utils`, and `despatch`.
 Grant these repository permissions:
 
 - Metadata: read
@@ -40,6 +40,15 @@ three repositories:
 
 Allow GitHub Actions to create pull requests in the organization or in each
 repository's **Actions > General > Workflow permissions** settings.
+
+If an Actions policy (**Settings > Actions > Policies**) limits who can trigger
+workflows, add the App's installation to its allowed actors with the actor type
+`IntegrationInstallation`. Without it, every run the App starts fails
+immediately with `startup_failure`: the tag build, the downstream impact
+workflows, and the checks on Prepare Release pull requests. In this
+organization an entry of type `App` did not match, while
+`IntegrationInstallation` did. See
+[Runs that never start](release-troubleshooting.md#runs-that-never-start-startup_failure).
 
 Set the `RELEASE_AUTOMATION_ENABLED` repository variable to `true` in Envoy
 after the App is installed everywhere. Until then, Envoy releases still build
@@ -78,6 +87,11 @@ Automated downstream checks use three states:
 - `required`: the current downstream source fails to compile, test, package,
   or pass its runtime checks with the Envoy candidate.
 
+`required` means the compatibility command failed. It does not say why, and the
+saved result holds only an exit code. Read the failing step's log before you
+change code; see
+[A `required` result: check the cause](release-troubleshooting.md#a-required-result-check-the-cause).
+
 Envoy Utils is tested against candidate Envoy Core on Linux and Windows.
 Despatch is tested on Windows against the released Envoy wheel, including its
 source tests, Ruff checks, PyInstaller build, final executable, bundled docs,
@@ -92,6 +106,31 @@ still be needed to deliver new statically linked or embedded behavior.
 All operator-provided version inputs are unprefixed SemVer values such as
 `0.6.0`. Automation adds the `v` prefix when it addresses Git tags. Stable and
 prerelease SemVer values are accepted.
+
+### Which repository, and which version?
+
+Each project has its own **Prepare Release** and **Tag Release** workflows and
+its own version number. Run each workflow in the repository that owns the
+version you are entering. An Envoy version such as `0.7.0` is not valid input
+for Envoy Utils or Despatch; their workflows expect their own versions.
+
+| Step | Repository | Workflow | Inputs |
+|---|---|---|---|
+| 1 | `envoy` | Prepare Release | `version`: the new Envoy version, for example `0.7.0`. |
+| 2 | `envoy` | *Merge the draft pull request.* | |
+| 3 | `envoy` | Tag Release | `version`: the same Envoy version, `0.7.0`. |
+| 4 | `envoy` | *Automatic:* Build & Release, publish, notify. | |
+| 5 | `envoy_utils` | Prepare Release | `version`: the **Envoy Utils** version, for example `0.2.2`. `envoy_version`: the published Envoy version, `0.7.0`. |
+| 6 | `envoy_utils` | Tag Release, after merging that pull request | `version`: the Envoy Utils version, `0.2.2`. |
+| 7 | `despatch` | Prepare Release | `version`: the **Despatch** version. `envoy_version`: the published Envoy version, `0.7.0`. |
+| 8 | `despatch` | Tag Release, after merging that pull request | `version`: the Despatch version. |
+
+Steps 5 to 8 apply only when the impact assessment says a downstream release is
+needed, and Envoy Utils and Despatch can proceed in parallel. Tag Release never
+needs a tag created beforehand: it creates the tag itself and fails if the tag
+already exists. If it fails with `Expected Envoy Utils X, found Y` (or the
+Despatch or Envoy equivalent), you entered another project's version, ran it in
+the wrong repository, or have not merged the Prepare Release pull request yet.
 
 ### Local validation before tagging
 
@@ -203,6 +242,16 @@ assets (see [Release artifacts](build-chain.md#release-artifacts)).
     release created by hand is public immediately, before any build has run, and
     shows as the repository's *latest* release with no assets. Envoy Utils and
     Despatch cannot use such a release.
+
+!!! note "The tag build starts by itself"
+    Do not start **Build & Release** yourself after Tag Release. Pushing the tag
+    starts it within seconds. Look for a **Build & Release** run on the tag, with
+    the event `push`, in the **Actions** tab. The **Run workflow** button on that
+    workflow is only for [validation builds](build-chain.md#validation-builds):
+    its *Version label* is just a name for the artifacts (leave it as `dev`), and
+    a validation build never publishes. If the run on the tag shows
+    `startup_failure` instead, see
+    [Runs that never start](release-troubleshooting.md#runs-that-never-start-startup_failure).
 
 After publication, Envoy immediately dispatches an `envoy-released` event to
 Envoy Utils and Despatch. Each repository validates the event against the
@@ -317,9 +366,13 @@ version for replay after a runner or external service failure.
   cause is outside the repository, such as software missing on a runner. If the
   fix changes a file, release the next patch version instead. See
   [Re-run or fix forward](release-troubleshooting.md#re-run-or-fix-forward).
+- A run that ends in `startup_failure` has no jobs and cannot be re-run. See
+  [Runs that never start](release-troubleshooting.md#runs-that-never-start-startup_failure).
 - Do not move or reuse a published tag. Fix forward with a new patch release. A
   tag that has been pushed counts as published, even when its build failed or
-  its release page is empty.
+  its release page is empty. The one narrow exception is re-pushing the
+  *identical* tag object when the first push never started a build; the
+  troubleshooting guide describes it.
 - If an Envoy release is bad, do not repin downstream projects to it. Publish a
   corrected Envoy patch first.
 - A maintainer may close a `review` issue without releasing, but should record

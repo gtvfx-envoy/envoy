@@ -48,7 +48,8 @@ other box is triggered by the one before it. The *Release Impact* workflows only
 ### Before the tag build: Prepare Release and Tag Release
 
 Both are manual workflows (**Actions > Run workflow**, or `gh workflow run`)
-that run on GitHub-hosted runners and use the `gt-release-automation` GitHub App.
+that run on GitHub-hosted runners and use the release automation GitHub App
+(`envoy-release-automation`).
 
 - **Prepare Release** opens (or updates) a *draft* pull request on
   `automation/release-vX.Y.Z`. It bumps the Cargo workspace version, refreshes
@@ -59,13 +60,22 @@ that run on GitHub-hosted runners and use the `gt-release-automation` GitHub App
   `lint.yml` passed on that exact commit, and neither the tag nor a GitHub
   Release exists yet. It then pushes the annotated tag `vX.Y.Z` using the App
   token. Pushing with the App token (rather than the default `GITHUB_TOKEN`) is
-  what makes the push start the next workflow.
+  what makes the push start the next workflow. That run is attributed to the
+  App's bot account, so any Actions policy that limits who can trigger
+  workflows must allow the App (see [CI Runners](ci-runners.md#security-notes)).
 
 ### What a tag build does
 
 The **Build & Release** workflow (`.github/workflows/build-release.yml`) starts
 when a tag matching `v*` is pushed. It can also be started by hand as a
 [validation build](#validation-builds).
+
+!!! note "You do not start the tag build"
+    Tag Release's tag push starts it automatically, within seconds. If you open
+    **Actions > Build & Release** and see nothing running, look for a run on the
+    tag (event `push`) instead of starting one yourself. If that run says
+    `startup_failure`, see
+    [Release Troubleshooting](release-troubleshooting.md#runs-that-never-start-startup_failure).
 
 ```mermaid
 flowchart LR
@@ -206,6 +216,11 @@ Each receiver re-checks the event against the real GitHub Release before doing
 anything: the Envoy tag must have a published release, the schema version must
 be `1`, and the commit at that tag must equal `envoy_commit`.
 
+Because the events are sent with the App token, the runs they start in Envoy
+Utils and Despatch are initiated by the App and are subject to the same Actions
+policies as the tag build. If an Actions policy does not allow the App, those
+runs show `startup_failure` and the downstream assessment never happens.
+
 ### Release artifacts
 
 A complete Envoy release has exactly nine assets:
@@ -268,10 +283,15 @@ gh workflow run "Build & Release" --repo gtvfx-envoy/envoy --ref main -f version
 gh run watch --repo gtvfx-envoy/envoy
 ```
 
+In the GitHub UI this is **Actions > Build & Release > Run workflow**. *Use
+workflow from* picks the branch whose copy of the workflow runs, and *Version
+label for a validation build* is the `version` input.
+
 - `--ref` may name a branch, in which case that branch's copy of the workflow
   runs. Use this to test a workflow change before merging it.
 - `version` is only a label (`dev` by default). Artifacts are named from it and
-  stay downloadable from the run page.
+  stay downloadable from the run page. Leave it as `dev` unless you want to tell
+  several validation runs apart.
 - Envoy Utils has the same `version` input. Despatch instead takes
   `envoy_version`, the published Envoy version to embed, and that Envoy release
   must already exist.
@@ -296,12 +316,12 @@ documentation deployment runs on the self-hosted Linux runner described in
 | Prepare Release | Self-hosted Windows | Manual (`version`, `envoy_version`) | Installs the requested Envoy release, syncs the Despatch version and the Envoy pin, runs tests, Ruff, and format checks, and opens a draft pull request. |
 | Tag Release | GitHub-hosted | Manual | Same validations, then pushes the annotated tag. |
 | Build & Release | Self-hosted Windows plus GitHub-hosted Linux and macOS | Tag push, or manual validation build (`envoy_version`) | Builds, smoke-tests, and uploads the executable on each platform. |
-| Envoy Release Impact | GitHub-hosted, plus self-hosted Windows for `validate` | `envoy-released` event, or manual replay | `classify` as for Envoy Utils. `validate` runs the source tests and builds and checks the final windowed executable. `notify` creates or updates the issue. |
+| Envoy Release Impact | GitHub-hosted, plus self-hosted Windows for `validate` | `envoy-released` event, or manual replay | `classify` as for Envoy Utils. `validate` runs the source tests and builds and checks the final windowed executable. `notify` creates or updates an issue labelled `dependency:envoy` and `release-impact:review` or `release-impact:required`. |
 
 Two Despatch details matter when you manage a release:
 
-- The Windows jobs need the studio bundle share configured by the
-  `ENVOY_STUDIO_BNDLS` Actions variable to be reachable from the Windows runner.
+- The Windows jobs need the bundle location named by the `ENVOY_STUDIO_BNDLS`
+  Actions variable to exist and be readable on the Windows runner.
   See [CI Runners](ci-runners.md#what-a-self-hosted-runner-must-provide).
 - Each platform job uploads its own asset to the GitHub Release as soon as it
   succeeds. There is no all-or-nothing gate like Envoy's `publish`, so one

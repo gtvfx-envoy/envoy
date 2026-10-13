@@ -95,13 +95,13 @@ workflows impose.
 - Visual Studio Build Tools (the MSVC linker). `lint.yml` sets up the developer
   command environment explicitly so Git's own `link.exe` cannot shadow the real
   linker.
-- For the Despatch jobs: the studio bundle share named by the
-  `ENVOY_STUDIO_BNDLS` Actions variable must be reachable. Despatch's build Stack
-  references its bundles through that variable, so the variable must be set (the
-  Stack fails to load outright otherwise) and the share it points to must be
-  reachable from the runner. The workflows carry a fallback value for the
-  current runner; set the variable at repository or organization level when you
-  replace the runner.
+- For the Despatch jobs: the bundle location named by the `ENVOY_STUDIO_BNDLS`
+  Actions variable must exist and be readable on the runner. Despatch's build
+  Stack references its bundles through that variable, so the variable must be
+  set (the Stack fails to load outright otherwise) and the location it names must
+  contain the bundles the Stack pins. It can be a directory on the runner or a
+  network share. The workflows carry a fallback value; set the variable at
+  repository or organization level when you replace the runner.
 
 ## Making the Linux runner Docker-capable
 
@@ -171,3 +171,10 @@ workflow tells them to.
 - Keep release triggers on trusted events only: tag pushes and manual dispatch.
 - Treat membership of the `docker` group as root access (see above), and avoid
   leaving credentials in persistent workspaces.
+- An Actions policy (**Settings > Actions > Policies**) can limit who may trigger
+  workflows. If you use one, it must also allow the release App, or every run the
+  App starts (the tag build, the downstream impact workflows, and the checks on
+  Prepare Release pull requests) fails immediately with `startup_failure`. Allow
+  the App's *installation* (actor type `IntegrationInstallation`), not a broader
+  group. See
+  [Release Troubleshooting](release-troubleshooting.md#runs-that-never-start-startup_failure).
