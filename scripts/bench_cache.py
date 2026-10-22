@@ -6,7 +6,8 @@ Examples:
     python scripts/bench_cache.py run --envoy envoy -- -s studio python -c "print(1)"
 
 ``run`` measures one cold run against an empty cache root, then ``--runs`` warm runs against the
-same root, and prints the timings as JSON.
+same root, and prints the timings as JSON. Unless ``--cache-root`` is given, the root is a fresh
+directory under ``~/.envoy`` that is removed afterwards.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -77,7 +79,9 @@ def parseArguments(argv: list[str]) -> argparse.Namespace:
     run.add_argument("--stack", help="Stack name or .estack path; passed as -s=<stack>.")
     run.add_argument("--runs", type=int, default=5, help="Warm runs after the cold one.")
     run.add_argument(
-        "--cache-root", type=Path, help="Cache root to use (default: a fresh temp dir)."
+        "--cache-root",
+        type=Path,
+        help="Cache root to use (default: a fresh short directory under ~/.envoy).",
     )
     run.add_argument("--json", type=Path, dest="json_path", help="Also write the result here.")
     run.add_argument(
@@ -236,6 +240,66 @@ def timeRun(command: list[str], environment: dict[str, str]) -> tuple[float, int
     return elapsed, result.returncode, result.stderr
 
 
+def makeScratchRoot() -> Path:
+    """Create an empty cache root whose path is about as short as the default one.
+
+    A long root makes Envoy leave bundles with deep paths on the share, which a user with the
+    default root does not see, so the timings would describe the wrong thing.
+
+    Returns:
+        The new directory, under ``~/.envoy``.
+
+    """
+    parent = Path.home() / ".envoy"
+    parent.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="b", dir=parent))
+
+
+def timeRuns(options: argparse.Namespace, command: list[str], cache_root: Path) -> dict:
+    """Time one cold run and ``options.runs`` warm runs against ``cache_root``.
+
+    Args:
+        options: Parsed ``run`` options.
+        command: Executable and arguments to time.
+        cache_root: Cache root every run uses.
+
+    Returns:
+        A JSON-serializable summary of the timings.
+
+    """
+    environment = os.environ.copy()
+    for variable in CACHE_ROOT_VARIABLES:
+        environment[variable] = str(cache_root)
+
+    version = subprocess.run(
+        [options.envoy, "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    ).stdout.strip()
+
+    timings: list[float] = []
+    exit_codes: list[int] = []
+    warnings = 0
+    for _ in range(options.runs + 1):
+        elapsed, code, stderr = timeRun(command, environment)
+        timings.append(round(elapsed))
+        exit_codes.append(code)
+        warnings = max(warnings, countWarnings(stderr))
+
+    return {
+        "envoy": version,
+        "command": command[1:],
+        "cold_ms": timings[0],
+        "warm_ms": timings[1:],
+        "warm_median_ms": round(statistics.median(timings[1:])) if timings[1:] else None,
+        "warnings_per_run": warnings,
+        "exit_codes": exit_codes,
+        "cache_bytes": directorySize(cache_root),
+    }
+
+
 def runBenchmark(options: argparse.Namespace) -> dict:
     """Time one cold run and ``options.runs`` warm runs.
 
@@ -255,40 +319,15 @@ def runBenchmark(options: argparse.Namespace) -> dict:
     if options.stack:
         base.append(f"-s={options.stack}")
 
-    with tempfile.TemporaryDirectory(prefix="envoy-bench-") as scratch:
-        cache_root = options.cache_root or Path(scratch) / "cache"
-        cache_root.mkdir(parents=True, exist_ok=True)
-        environment = os.environ.copy()
-        for variable in CACHE_ROOT_VARIABLES:
-            environment[variable] = str(cache_root)
+    if options.cache_root:
+        options.cache_root.mkdir(parents=True, exist_ok=True)
+        return timeRuns(options, base + command, options.cache_root)
 
-        version = subprocess.run(
-            [options.envoy, "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        ).stdout.strip()
-
-        timings: list[float] = []
-        exit_codes: list[int] = []
-        warnings = 0
-        for _ in range(options.runs + 1):
-            elapsed, code, stderr = timeRun(base + command, environment)
-            timings.append(round(elapsed))
-            exit_codes.append(code)
-            warnings = max(warnings, countWarnings(stderr))
-
-        return {
-            "envoy": version,
-            "command": base[1:] + command,
-            "cold_ms": timings[0],
-            "warm_ms": timings[1:],
-            "warm_median_ms": round(statistics.median(timings[1:])) if timings[1:] else None,
-            "warnings_per_run": warnings,
-            "exit_codes": exit_codes,
-            "cache_bytes": directorySize(cache_root),
-        }
+    scratch = makeScratchRoot()
+    try:
+        return timeRuns(options, base + command, scratch)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:
