@@ -50,6 +50,11 @@ pub fn expand_source(
     }
     expanded.push_str(rest);
 
+    // The file may be written with forward slashes anywhere, but Windows shows
+    // and compares paths with backslashes.
+    #[cfg(windows)]
+    let expanded = expanded.replace('/', "\\");
+
     if expanded.trim().is_empty() {
         return Err(fail("it expands to nothing".to_string()));
     }

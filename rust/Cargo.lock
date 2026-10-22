@@ -599,6 +599,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoy-shim"
+version = "0.7.0"
+dependencies = [
+ "ctrlc",
+ "envoy-config",
+ "envoy-store",
+ "tempfile",
+ "winres",
+]
+
+[[package]]
 name = "envoy-store"
 version = "0.7.0"
 dependencies = [

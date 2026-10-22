@@ -5,6 +5,7 @@ members = [
     "envoy-core",
     "envoy-py",
     "envoy-cli",
+    "envoy-shim",
     "envoy-store",
 ]
 

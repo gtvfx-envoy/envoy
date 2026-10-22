@@ -109,6 +109,8 @@ impl Redirect {
     /// A file written for a newer schema is reported as such before anything
     /// else, since its other fields may mean something different.
     pub fn parse(text: &str) -> Result<Self> {
+        // Editors on Windows may save UTF-8 with a byte order mark.
+        let text = text.trim_start_matches('\u{feff}');
         let value: Value =
             serde_yaml::from_str(text).map_err(|error| ConfigError::Syntax(error.to_string()))?;
         let schema = match value.get("schema") {
@@ -422,6 +424,13 @@ users:
     fn duplicate_keys_are_rejected() {
         let error = Redirect::parse("schema: 1\nschema: 1\n").expect_err("duplicates are refused");
         assert!(matches!(error, ConfigError::Syntax(_)), "{error}");
+    }
+
+    #[test]
+    fn a_byte_order_mark_from_a_windows_editor_is_ignored() {
+        let with_mark = format!("\u{feff}{STUDIO}");
+
+        assert_eq!(Redirect::parse(&with_mark).expect("parses"), studio());
     }
 
     #[test]
