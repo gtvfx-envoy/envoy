@@ -68,6 +68,8 @@ nav:
   - Environment Files: env-files.md
   - Bundle Discovery: bundle-discovery.md
   - Bundle Caching: caching.md
+  - Launcher: launcher.md
+  - Team Administration: team-administration.md
   - Environment Modes: environment-modes.md
   - User Configuration: user-config.md
   - Telemetry: telemetry.md

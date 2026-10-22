@@ -4,7 +4,22 @@ Envoy releases support Windows, Linux, and macOS. Download the archive or
 wheel matching the operating system and CPU from the latest
 [GitHub Release](https://github.com/gtvfx-envoy/envoy/releases).
 
-## Full Bundle (Recommended)
+## The Launcher (for Teams)
+
+On a team, install the [launcher](launcher.md) instead of a full bundle. It is a
+small program that reads one file on the team's share to learn which envoy
+version you should run, copies that version to your disk the first time, and
+runs it, so the whole team moves to a new version by editing that one file. Run
+the installer your administrator published on the share:
+
+```powershell
+& "$env:ENVOY_CONFIG_PROD\shim\install-envoy.ps1"
+```
+
+See [The Envoy Launcher](launcher.md) for what it does, and
+[Team Administration](team-administration.md) for setting it up.
+
+## Full Bundle
 
 | Platform | Archive |
 |---|---|

@@ -26,9 +26,10 @@ By default the cache is `~/.envoy/cache` (`%USERPROFILE%\.envoy\cache` on Window
 ```text
 ~/.envoy/cache/
   bundles/<namespace>/<name>/<version>/   one bundle, ready to run
+  bundles/app/envoy/<version>/            a version of envoy itself, copied by the launcher
 ```
 
-The version is exactly the one in the bundle's `.bundle` marker, so `v0.7.0` and `0.7.0` are different entries.
+The version is exactly the one in the bundle's `.bundle` marker, so `v0.7.0` and `0.7.0` are different entries. The [launcher](launcher.md) keeps the envoy versions it runs in the same place, as the `app:envoy` entries that `en cache list` shows, and they are cleaned up the same way.
 
 Keep the cache on a local disk. If the directory is on a network location (a UNC path on Windows, an NFS or SMB mount on Linux), `envoy cache status` and `envoy --diagnose` warn about it: a cache there saves little, since every read still crosses the network, and file locks, which keep two envoys from copying the same bundle at once, are not reliable on some network filesystems. A home directory mounted over NFS is the usual cause; point `ENVOY_CACHE_ROOT` at a local disk instead.
 

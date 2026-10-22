@@ -365,6 +365,15 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_PYINIT` | Platform-separated directories whose `*.py` files run once `import envoy` finishes initializing (see [Advanced Topics](../advanced.md#python-api-initialization-hooks-envoy_pyinit)) |
 | `ENVOY_PYTHON_API` | `off`, `false`, `no`, or `0` stops a release of envoy adding its own Python API (`py/`) to the end of `PYTHONPATH` for the commands it launches (see [Installation](../installation.md)) |
 | `ENVOY_PYTHON_PATH` | Set by a release of envoy for the commands it launches: the directory of the Python API that ships with it |
+| `ENVOY_CONFIG_PROD` | The team's config folder, which holds `redirect.yaml` and `shim/`; read by the [launcher](../launcher.md) |
+| `ENVOY_TEAM` | A team name for the [launcher](../launcher.md): its `redirect.yaml` is looked for in `<ENVOY_CONFIG_PROD>/<team>` first |
+| `ENVOY_REDIRECT_CONFIG` | A redirect file for the [launcher](../launcher.md) to use instead of looking for one |
+| `ENVOY_VERSION` | Run this envoy version, ignoring the redirect file ([launcher](../launcher.md)) |
+| `ENVOY_USER` | The name the [launcher](../launcher.md) looks up in the redirect file, instead of your login name |
+| `ENVOY_SHIM_TIMEOUT_MS` | Milliseconds the [launcher](../launcher.md) waits for the share before using its saved copy of the redirect file (default `2000`) |
+| `ENVOY_SHIM_UPDATE` | `off` stops the [launcher](../launcher.md) updating itself |
+| `ENVOY_BIN_LOCK` | Set for the programs envoy runs: the envoy that started them. The launcher keeps a nested `envoy` call on that version |
+| `ENVOY_BIN_FLOAT` | Set for the programs envoy runs: the launcher that started the outermost envoy |
 
 ## User Config Flags
 
