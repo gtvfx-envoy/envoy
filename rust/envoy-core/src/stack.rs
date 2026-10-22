@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::discovery::{
-    expand_bundle_path, infer_namespace, resolve_input_path, validate_bundle, Bundle, BundleInfo,
+    expand_bundle_path, resolve_input_path, validate_bundle, Bundle, BundleInfo,
 };
 use crate::error::{EnvoyError, Result};
 use crate::stack_registry::{
@@ -291,7 +291,7 @@ impl Stack {
             .iter()
             .map(|document| {
                 let path = resolve_bundle_path(&self.path, &document.path)?;
-                let bundle = Bundle::new(&path, Some(&infer_namespace(&path)))?;
+                let bundle = Bundle::new(&path, None)?;
                 Ok(StackBundleEntry {
                     bundle,
                     metadata: document.metadata.clone(),
@@ -543,6 +543,7 @@ mod tests {
     };
     use crate::error::EnvoyError;
     use crate::path_test::assert_same_path;
+    use crate::runtime::apply_bundle_overrides;
     use crate::stack_registry::STACK_ROOTS_VAR;
 
     struct EnvVarGuard {
@@ -654,6 +655,68 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("core")
         );
+    }
+
+    #[test]
+    fn stack_bundles_take_their_identity_from_the_published_marker() {
+        let temp = tempdir().expect("tempdir should be created");
+        let python = create_bundle(&temp.path().join("ext").join("python"), "3.11.9-envoy.2");
+        fs::write(
+            python.join(".bundle"),
+            r#"{"bndlid": "ext:python", "name": "python", "version": "3.11.9-envoy.2"}"#,
+        )
+        .expect("failed to write marker");
+        let globals = create_bundle(&temp.path().join("globals"), "0.3.0");
+        fs::write(
+            globals.join(".bundle"),
+            r#"{"bndlid": "globals", "name": "globals", "version": "0.3.0"}"#,
+        )
+        .expect("failed to write marker");
+        let unmarked = create_bundle(&temp.path().join("tools"), "render");
+
+        let stack_path = temp.path().join("studio.estack");
+        let entries = [&python, &globals, &unmarked]
+            .iter()
+            .map(|path| format!("  - path: '{}'\n", path.to_string_lossy()))
+            .collect::<String>();
+        fs::write(&stack_path, format!("namespace: gt\nbundles:\n{entries}"))
+            .expect("failed to write stack");
+
+        let stack = Stack::new(&stack_path).expect("stack should load");
+        let ids = stack
+            .bundle_infos()
+            .expect("bundles should load")
+            .iter()
+            .map(|info| info.bndlid())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["ext:python", "gt:globals", "tools:render"]);
+    }
+
+    #[test]
+    fn stack_bundles_match_bundle_overrides_by_their_published_identity() {
+        let temp = tempdir().expect("tempdir should be created");
+        let published = create_bundle(&temp.path().join("envoy"), "v0.7.0");
+        fs::write(
+            published.join(".bundle"),
+            r#"{"bndlid": "gt:envoy", "name": "envoy", "version": "v0.7.0"}"#,
+        )
+        .expect("failed to write marker");
+        let checkout = create_bundle(temp.path(), "envoy_checkout");
+        let stack_path = temp.path().join("studio.estack");
+        fs::write(&stack_path, stack_yaml("gt", &published.to_string_lossy()))
+            .expect("failed to write stack");
+
+        let infos = Stack::new(&stack_path)
+            .expect("stack should load")
+            .bundle_infos()
+            .expect("bundles should load");
+        let (resolved, problems) =
+            apply_bundle_overrides(infos, &[("gt:envoy".to_string(), checkout.clone())]);
+
+        assert!(problems.is_empty(), "unexpected problems: {problems:?}");
+        assert_eq!(resolved[0].root, checkout);
+        assert_eq!(resolved[0].bndlid(), "gt:envoy");
     }
 
     #[test]

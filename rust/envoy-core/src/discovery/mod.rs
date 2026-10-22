@@ -14,6 +14,9 @@
 //! Published bundles are detected by a `.bundle` marker file. Checkout
 //! bundles are detected by a `.git/` directory. In both cases a valid envoy
 //! bundle must also contain a `.envoy/` directory.
+//!
+//! A bundle's `namespace:name` identity comes from [`bundle_identity`]: the
+//! `.bundle` marker for published bundles, the directory layout otherwise.
 
 use std::env;
 use std::path::Path;
@@ -41,6 +44,7 @@ pub const BUNDLE_ENV_DIR: &str = ".envoy";
 pub mod bndlid;
 pub(crate) mod cache;
 pub(crate) mod files;
+pub mod identity;
 pub(crate) mod scan;
 mod tests;
 pub mod types;
@@ -50,6 +54,7 @@ pub(crate) use bndlid::expand_bundle_path;
 pub use bndlid::{is_bndlid, resolve_bndlid};
 pub use cache::{discovery_cache_key, discovery_cache_lock_path, discovery_cache_path};
 pub use files::{get_bundle_commands_files, get_bundle_env_files};
+pub use identity::{bundle_identity, BundleIdentity, IdentitySource};
 pub use scan::{
     find_bundle_roots, find_git_repos, has_envoy_env, is_git_repo, is_published_bundle,
     validate_bundle,
