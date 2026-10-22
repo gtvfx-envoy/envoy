@@ -14,6 +14,9 @@ wheel matching the operating system and CPU from the latest
 | macOS Apple silicon | `envoy-v<version>-macos-aarch64.tar.gz` |
 
 Each archive contains `gt/envoy/<version>/bin`. Add that directory to `PATH`.
+The archive also carries the Python API in `py/`, and `.envoy/python_env.json`
+adds it to `PYTHONPATH` for commands that use the bundle, so `import envoy`
+works there without installing the wheel.
 
 === "Windows PowerShell"
 
