@@ -77,7 +77,7 @@ def archiveEntries(binary_directory: Path, windows: bool) -> list[Entry]:
             Entry(f"envoy{suffix}", built, mode=EXECUTABLE_MODE),
             Entry(f"en{suffix}", built, mode=EXECUTABLE_MODE),
         ]
-        script_names = ("install-envoy.ps1", "uninstall-envoy.ps1")
+        script_names = ("install-envoy.ps1", "uninstall-envoy.ps1", "verify-launcher.ps1")
     else:
         # A link, so a copy of the launcher cannot drift from the one it is named for.
         entries = [

@@ -67,6 +67,7 @@ def testWindowsArchiveHoldsTheLauncherUnderBothNamesAndItsPowerShellScripts(
         "en.exe",
         "install-envoy.ps1",
         "uninstall-envoy.ps1",
+        "verify-launcher.ps1",
         "LICENSE",
     }
 

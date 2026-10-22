@@ -37,7 +37,11 @@ If PowerShell refuses to run a script that came from the internet, unblock it fi
 
 A shared or farm machine can install the launcher for every user with `-Scope Machine` from an elevated prompt (it goes to `%ProgramData%\envoy\bin` and the machine `PATH`). A machine-wide launcher does not update itself; run the installer again to update it.
 
-You can also install from an unpacked launcher archive (`envoy-shim-v<version>-<platform>`) instead of the share: run the installer script that is inside it. The archive holds the launcher, `install-envoy` and `uninstall-envoy` scripts for the platform, and the license.
+You can also install from an unpacked launcher archive (`envoy-shim-v<version>-<platform>`) instead of the share: run the installer script that is inside it. The archive holds the launcher, `install-envoy` and `uninstall-envoy` scripts for the platform, and the license. The Windows archive also holds `verify-launcher.ps1`, which runs envoy through a handful of checks (the launcher is the first `envoy` on `PATH`, the redirect file gives a version, envoy starts and keeps its exit codes, it still starts when the share is slow, and so on) and prints `PASS`, `FAIL` or `SKIP` for each:
+
+```powershell
+.\verify-launcher.ps1 -Stack studio -ExpectVersion v0.8.0
+```
 
 ## Settings
 
