@@ -74,6 +74,11 @@ impl EntryKey {
     pub(crate) fn lock_file_name(&self) -> String {
         format!("{}~{}~{}.lock", self.namespace, self.name, self.version)
     }
+
+    /// Return the file name of this entry's refusal record.
+    pub(crate) fn refusal_file_name(&self) -> String {
+        format!("{}~{}~{}.json", self.namespace, self.name, self.version)
+    }
 }
 
 impl fmt::Display for EntryKey {

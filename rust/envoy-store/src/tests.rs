@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::{tempdir, TempDir};
 
+use crate::refusal::{self, Refusal};
 use crate::{EntryKey, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError, STORE_FORMAT};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -451,25 +452,158 @@ fn a_store_or_entry_from_a_newer_envoy_is_left_alone() {
 }
 
 #[cfg(windows)]
-#[test]
-fn an_entry_whose_paths_would_be_too_long_is_refused() {
-    let temp = tempdir().expect("tempdir is created");
-    let root = (0..9).fold(temp.path().join("store"), |path, level| {
+/// A store whose root is too deep for the source's deepest file to fit under it.
+fn too_deep_for_the_store(temp: &Path) -> (Store, PathBuf) {
+    let root = (0..9).fold(temp.join("store"), |path, level| {
         path.join(format!("deep_root_{level}"))
     });
     let store = Store::open(&root).expect("store opens");
-    let source = temp.path().join("source");
+    let source = temp.join("source");
     let deep = (0..12).fold(source.clone(), |path, level| {
         path.join(format!("nested_{level:05}"))
     });
     write(&deep.join("leaf.txt"), "deep");
+    (store, source)
+}
+
+#[cfg(windows)]
+#[test]
+fn an_entry_whose_paths_would_be_too_long_is_refused() {
+    let temp = tempdir().expect("tempdir is created");
+    let (store, source) = too_deep_for_the_store(temp.path());
 
     let error = store
         .ensure(&key("1.0.0"), &source, &Quiet)
         .expect_err("paths over the limit are refused");
 
-    assert!(matches!(error, StoreError::PathTooLong { .. }), "{error}");
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                remembered: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
     assert!(store.lookup(&key("1.0.0")).is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_refused_entry_is_not_walked_again() {
+    let temp = tempdir().expect("tempdir is created");
+    let (store, source) = too_deep_for_the_store(temp.path());
+    let key = key("1.0.0");
+    store
+        .ensure(&key, &source, &Quiet)
+        .expect_err("the first run finds the entry does not fit");
+
+    // With the source gone, only a remembered answer can explain a refusal.
+    fs::remove_dir_all(&source).expect("source is removed");
+    let error = store
+        .ensure(&key, &source, &Quiet)
+        .expect_err("the refusal is remembered");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                remembered: true,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[cfg(windows)]
+/// A source whose one file has a path of exactly `longest` characters.
+fn source_with_longest_path(parent: &Path, longest: usize) -> PathBuf {
+    let source = parent.join("source");
+    write(&source.join("d".repeat(longest - 2)).join("f"), "x");
+    source
+}
+
+#[cfg(windows)]
+#[test]
+fn the_path_limit_is_measured_at_the_final_location() {
+    let temp = tempdir().expect("tempdir is created");
+    let store = Store::open(temp.path().join("store")).expect("store opens");
+    let fits = EntryKey::new("a", "b", "1").expect("key is valid");
+    let over = EntryKey::new("a", "b", "2").expect("key is valid");
+    let longest = 250 - (store.entry_path(&fits).as_os_str().len() + 1);
+    assert!(
+        longest > 2 && longest < 255,
+        "the temp dir is unusable here"
+    );
+
+    // Only the final location counts. A staging path is longer than it by a few
+    // characters here, and still works because std gives it the long-path prefix.
+    let at_limit = source_with_longest_path(&temp.path().join("fits"), longest);
+    store
+        .ensure(&fits, &at_limit, &Quiet)
+        .expect("a path exactly at the limit is cached");
+
+    let too_long = source_with_longest_path(&temp.path().join("over"), longest + 1);
+    let error = store
+        .ensure(&over, &too_long, &Quiet)
+        .expect_err("a path one character over is refused");
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                needed: 251,
+                limit: 250,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_refusal_that_no_longer_holds_is_forgotten() {
+    let fixture = fixture();
+    let key = key("1.0.0");
+    let record = fixture.store.refusal_path(&key);
+    refusal::write(&record, &Refusal::path_too_long(5)).expect("record is written");
+
+    let ensured = fixture
+        .store
+        .ensure(&key, &fixture.source, &Quiet)
+        .expect("a bundle that fits is cached");
+
+    assert!(matches!(ensured.outcome, Outcome::Filled { .. }));
+    assert!(!record.exists());
+}
+
+#[test]
+fn prune_forgets_idle_refusals_and_clear_forgets_them_all() {
+    let fixture = fixture();
+    let old = fixture.store.refusal_path(&key("1.0.0"));
+    let recent = fixture.store.refusal_path(&key("2.0.0"));
+    for record in [&old, &recent] {
+        refusal::write(record, &Refusal::path_too_long(300)).expect("record is written");
+    }
+    File::options()
+        .write(true)
+        .open(&old)
+        .expect("record opens")
+        .set_modified(SystemTime::now() - 40 * DAY)
+        .expect("record is backdated");
+
+    fixture.store.prune(&PrunePolicy::idle_for(30 * DAY));
+    assert!(!old.exists());
+    assert!(recent.exists());
+
+    let mut dry_run = PrunePolicy::everything();
+    dry_run.dry_run = true;
+    fixture.store.prune(&dry_run);
+    assert!(recent.exists());
+
+    fixture.store.clear();
+    assert!(!recent.exists());
 }
 
 #[cfg(unix)]

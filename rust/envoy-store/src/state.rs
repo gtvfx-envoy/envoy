@@ -86,8 +86,12 @@ pub(crate) fn last_used(entry: &Path, state: Option<&EntryState>) -> SystemTime 
 ///
 /// Best effort: a read-only store still serves its entries.
 pub(crate) fn touch_last_used(entry: &Path, now: SystemTime) {
-    let stamp = state_dir(entry).join(LAST_USED_FILE);
-    let recent = fs::metadata(&stamp)
+    touch_file(&state_dir(entry).join(LAST_USED_FILE), now);
+}
+
+/// Set a file's modified time to `now`, unless it was set recently.
+pub(crate) fn touch_file(stamp: &Path, now: SystemTime) {
+    let recent = fs::metadata(stamp)
         .and_then(|metadata| metadata.modified())
         .map(|modified| now.duration_since(modified).unwrap_or(Duration::ZERO) < TOUCH_INTERVAL)
         .unwrap_or(false);
@@ -99,7 +103,7 @@ pub(crate) fn touch_last_used(entry: &Path, now: SystemTime) {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&stamp)
+        .open(stamp)
     {
         let _ = file.set_modified(now);
     }

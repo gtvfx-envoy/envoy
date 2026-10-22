@@ -38,6 +38,9 @@ pub enum StoreError {
     InvalidSource { key: String, path: PathBuf },
 
     /// The longest path in the entry would not fit under the store root.
+    ///
+    /// The refusal is remembered, so the source is not walked again until the
+    /// store moves or the rule changes.
     #[error(
         "{key} contains paths that would reach {needed} characters under {root}; \
 the limit is {limit}"
@@ -47,6 +50,8 @@ the limit is {limit}"
         needed: usize,
         limit: usize,
         root: PathBuf,
+        /// `true` when an earlier run already found this and was reported.
+        remembered: bool,
     },
 
     /// The volume holding the store has too little free space.

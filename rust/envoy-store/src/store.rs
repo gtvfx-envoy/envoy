@@ -11,9 +11,10 @@ use crate::fill;
 use crate::key::EntryKey;
 use crate::lock::{Lease, LockFile};
 use crate::observer::Observer;
+use crate::refusal::{self, Refusal, REFUSED_DIR};
 use crate::state::{
-    self, is_kept, is_usable, last_used, read_state, touch_last_used, unix_seconds, EntryState,
-    STORE_FORMAT,
+    self, is_kept, is_usable, last_used, read_state, touch_file, touch_last_used, unix_seconds,
+    EntryState, STORE_FORMAT,
 };
 
 const STORE_FILE: &str = "store.json";
@@ -30,11 +31,11 @@ const SPACE_HEADROOM: u64 = 64 * 1024 * 1024;
 
 /// Longest path (in characters) the store will create on Windows, leaving
 /// room below the classic 260 limit that many tools still honour.
+///
+/// It applies to where an entry finally lives, because that is where other
+/// programs open files. A staging path is only ever used by the store, and the
+/// standard library gives it the long-path prefix, so it may be longer.
 const WINDOWS_PATH_LIMIT: usize = 250;
-
-/// Room reserved for a staging directory's unique name.
-const STAGING_NAME_ALLOWANCE: usize = 32;
-
 /// Times `ensure` will start over when an entry is removed under it.
 const ENSURE_ATTEMPTS: u32 = 3;
 
@@ -157,6 +158,7 @@ pub struct PruneReport {
 ///   bundles/<ns>/<name>/<version>/     a bundle, ready to run
 ///     .store/                          state, last-used stamp, optional keep
 ///   locks/                             one lock file per entry
+///   refused/                           entries known not to fit here
 ///   .staging/                          fills in progress
 ///   .trash/                            removals in progress
 /// ```
@@ -218,6 +220,14 @@ impl Store {
 
     fn trash_dir(&self) -> PathBuf {
         self.root.join(TRASH_DIR)
+    }
+
+    fn refused_dir(&self) -> PathBuf {
+        self.root.join(REFUSED_DIR)
+    }
+
+    pub(crate) fn refusal_path(&self, key: &EntryKey) -> PathBuf {
+        self.refused_dir().join(key.refusal_file_name())
     }
 
     fn lock_for(&self, key: &EntryKey) -> Result<LockFile> {
@@ -293,6 +303,11 @@ impl Store {
     }
 
     fn fill(&self, key: &EntryKey, source: &Path, observer: &dyn Observer) -> Result<Outcome> {
+        // An entry already found not to fit costs nothing to refuse again.
+        if let Some(error) = self.remembered_refusal(key) {
+            return Err(error);
+        }
+
         if !source.is_dir() {
             return Err(StoreError::InvalidSource {
                 key: key.to_string(),
@@ -302,7 +317,10 @@ impl Store {
 
         let started = Instant::now();
         let plan = fill::plan(source).map_err(io_error(source))?;
-        self.check_path_budget(key, &plan)?;
+        if let Err(error) = self.check_path_budget(key, plan.longest, false) {
+            self.remember_refusal(key, plan.longest);
+            return Err(error);
+        }
         self.check_free_space(key, &plan)?;
 
         self.clean_orphans();
@@ -401,23 +419,51 @@ impl Store {
         self.staging_dir().join(unique_name())
     }
 
-    fn check_path_budget(&self, key: &EntryKey, plan: &fill::Plan) -> Result<()> {
+    /// Fail when the entry's longest path would not fit under the store root.
+    fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
         if !cfg!(windows) {
             return Ok(());
         }
 
-        let in_staging = self.staging_dir().as_os_str().len() + 1 + STAGING_NAME_ALLOWANCE;
-        let in_place = self.entry_path(key).as_os_str().len();
-        let needed = in_staging.max(in_place) + 1 + plan.longest;
+        let needed = self.entry_path(key).as_os_str().len() + 1 + longest;
         if needed > WINDOWS_PATH_LIMIT {
             return Err(StoreError::PathTooLong {
                 key: key.to_string(),
                 needed,
                 limit: WINDOWS_PATH_LIMIT,
                 root: self.root.clone(),
+                remembered,
             });
         }
         Ok(())
+    }
+
+    /// Return the refusal recorded for `key` if it still holds.
+    ///
+    /// The record holds only the longest path in the source, so it is checked
+    /// again against where the store is now. A record that no longer holds is
+    /// deleted and the entry is planned afresh.
+    fn remembered_refusal(&self, key: &EntryKey) -> Option<StoreError> {
+        let path = self.refusal_path(key);
+        let record = refusal::read(&path)?;
+
+        match self.check_path_budget(key, record.longest, true) {
+            Err(error) => {
+                touch_file(&path, SystemTime::now());
+                Some(error)
+            }
+            Ok(()) => {
+                let _ = fs::remove_file(&path);
+                None
+            }
+        }
+    }
+
+    fn remember_refusal(&self, key: &EntryKey, longest: usize) {
+        let path = self.refusal_path(key);
+        if let Err(error) = refusal::write(&path, &Refusal::path_too_long(longest)) {
+            tracing::debug!(entry = %key, "Could not record that the entry does not fit: {error}");
+        }
     }
 
     fn check_free_space(&self, key: &EntryKey, plan: &fill::Plan) -> Result<()> {
@@ -494,9 +540,14 @@ impl Store {
     /// Remove entries the policy allows, skipping any that are in use.
     ///
     /// An entry is in use while an envoy holds a [`Lease`] on it, and on
-    /// Windows also while any process has a file open inside it.
+    /// Windows also while any process has a file open inside it. Records of
+    /// refused entries that nothing has consulted for as long are forgotten
+    /// too, so a policy that removes everything leaves no trace.
     pub fn prune(&self, policy: &PrunePolicy) -> PruneReport {
         self.clean_orphans();
+        if !policy.dry_run {
+            refusal::forget_idle(&self.refused_dir(), policy.now, policy.max_idle);
+        }
 
         let mut doomed = Vec::new();
         let mut survivors = Vec::new();
