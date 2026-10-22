@@ -29,7 +29,9 @@ mod fill;
 mod key;
 mod lock;
 mod observer;
+mod progress;
 mod refusal;
+pub mod settings;
 mod state;
 mod store;
 
@@ -37,6 +39,7 @@ pub use error::{Result, StoreError};
 pub use key::EntryKey;
 pub use lock::Lease;
 pub use observer::{Observer, Quiet};
+pub use progress::{format_bytes, ProgressPrinter};
 pub use state::{EntryState, STORE_FORMAT};
 pub use store::{Ensured, EntryInfo, Health, Outcome, PrunePolicy, PruneReport, Store, Verdict};
 

@@ -603,6 +603,7 @@ name = "envoy-store"
 version = "0.7.0"
 dependencies = [
  "fs4",
+ "json_comments",
  "rayon",
  "serde",
  "serde_json",

@@ -8,13 +8,14 @@
 //! and diagnosing read bundle metadata from the share and leave it there.
 
 use std::collections::HashSet;
-use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-pub use envoy_store::{EntryInfo, Health, PrunePolicy, PruneReport, Store, Verdict};
+pub use envoy_store::settings::{parse_switch, CACHE_ROOT_VAR, CACHE_SETTING, CACHE_VAR};
+pub use envoy_store::{
+    format_bytes, EntryInfo, Health, ProgressPrinter, PrunePolicy, PruneReport, Store, Verdict,
+};
 use envoy_store::{EntryKey, Lease, Observer, Outcome, StoreError};
 
 use crate::commands::CommandRegistry;
@@ -22,25 +23,12 @@ use crate::discovery::{is_published_bundle, Bundle, BundleInfo, BUNDLE_CHECKOUT}
 use crate::runtime::collect_env_files;
 use crate::user_config::{config_root, UserConfig};
 
-/// `on` or `off`: turn bundle caching on or off. Wins over every other setting.
-pub const CACHE_VAR: &str = "ENVOY_CACHE";
-
-/// Directory holding the local store.
-pub const CACHE_ROOT_VAR: &str = "ENVOY_CACHE_ROOT";
-
 /// Days an entry may sit unused before prune removes it.
 pub const CACHE_MAX_IDLE_DAYS_VAR: &str = "ENVOY_CACHE_MAX_IDLE_DAYS";
 
 /// Size the store may grow to before the least recently used entries go, such
 /// as `500GB`. Unset means no limit.
 pub const CACHE_MAX_SIZE_VAR: &str = "ENVOY_CACHE_MAX_SIZE";
-
-/// User-config setting that turns caching on or off.
-pub const CACHE_SETTING: &str = "cache";
-
-const LEGACY_DISABLE_VAR: &str = crate::bundle_cache::BUNDLE_CACHE_DISABLE_VAR;
-const LEGACY_ROOT_VAR: &str = crate::bundle_cache::BUNDLE_CACHE_DIR_VAR;
-const LEGACY_ROOT_SETTING: &str = crate::bundle_cache::BUNDLE_CACHE_DIR_SETTING;
 
 /// Days of disuse before an entry is removed, unless configured otherwise.
 pub const DEFAULT_MAX_IDLE_DAYS: u64 = 30;
@@ -50,9 +38,6 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// File in the store root whose modified time records the last background prune.
 const LAST_PRUNE_FILE: &str = "last-prune";
-
-/// How often a non-interactive run reports progress.
-const LINE_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Everything that decides whether and where bundles are cached.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,41 +80,25 @@ impl CacheSettings {
         user_config: Option<&UserConfig>,
         config_root: PathBuf,
     ) -> Self {
+        let location = envoy_store::settings::resolve(
+            &env,
+            &|key| {
+                user_config
+                    .and_then(|config| config.get(key))
+                    .map(str::to_string)
+            },
+            &config_root,
+        );
         let non_empty = |name: &str| env(name).filter(|value| !value.trim().is_empty());
-        let setting = |key: &str| {
-            user_config
-                .and_then(|config| config.get(key))
-                .filter(|value| !value.trim().is_empty())
-        };
-
-        let (enabled, enabled_by) =
-            if let Some(on) = non_empty(CACHE_VAR).as_deref().and_then(parse_switch) {
-                (on, CACHE_VAR)
-            } else if non_empty(LEGACY_DISABLE_VAR)
-                .as_deref()
-                .and_then(parse_switch)
-                == Some(true)
-            {
-                (false, LEGACY_DISABLE_VAR)
-            } else if let Some(on) = setting(CACHE_SETTING).and_then(parse_switch) {
-                (on, "the cache user setting")
-            } else {
-                (true, "the default")
-            };
-
-        let root = non_empty(CACHE_ROOT_VAR)
-            .or_else(|| non_empty(LEGACY_ROOT_VAR))
-            .or_else(|| setting(LEGACY_ROOT_SETTING).map(str::to_string))
-            .map_or_else(|| config_root.join("cache"), PathBuf::from);
 
         let max_idle_days = non_empty(CACHE_MAX_IDLE_DAYS_VAR)
             .and_then(|value| value.trim().parse::<u64>().ok())
             .unwrap_or(DEFAULT_MAX_IDLE_DAYS);
 
         Self {
-            enabled,
-            enabled_by,
-            root,
+            enabled: location.enabled,
+            enabled_by: location.enabled_by,
+            root: location.root,
             max_idle: Duration::from_secs(max_idle_days * 24 * 60 * 60),
             max_bytes: non_empty(CACHE_MAX_SIZE_VAR)
                 .as_deref()
@@ -171,15 +140,6 @@ impl CacheSettings {
             max_bytes: self.max_bytes,
             ..PrunePolicy::idle_for(self.max_idle)
         }
-    }
-}
-
-/// Parse `on`/`off`, `true`/`false`, `yes`/`no`, or `1`/`0`.
-pub fn parse_switch(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "1" => Some(true),
-        "off" | "false" | "no" | "0" => Some(false),
-        _ => None,
     }
 }
 
@@ -228,93 +188,6 @@ fn hold(lease: Lease) {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .push(lease);
-}
-
-/// Shows what the store is doing on standard error.
-///
-/// On a terminal, progress rewrites one line. Otherwise a line is printed
-/// every few seconds, so a log stays readable.
-pub struct ProgressPrinter {
-    interactive: bool,
-    last_line: Mutex<Option<Instant>>,
-    drew: AtomicBool,
-}
-
-impl ProgressPrinter {
-    /// A printer for standard error as it is attached right now.
-    pub fn new() -> Self {
-        Self {
-            interactive: std::io::stderr().is_terminal(),
-            last_line: Mutex::new(None),
-            drew: AtomicBool::new(false),
-        }
-    }
-}
-
-impl Default for ProgressPrinter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Observer for ProgressPrinter {
-    fn waiting(&self, key: &EntryKey) {
-        eprintln!("envoy: waiting for another envoy to finish caching {key}...");
-    }
-
-    fn started(&self, key: &EntryKey, files: u64, bytes: u64) {
-        eprintln!(
-            "envoy: caching {key} ({files} files, {}) on first use...",
-            format_bytes(bytes)
-        );
-    }
-
-    fn progress(&self, key: &EntryKey, done: u64, total: u64) {
-        let percent = (done * 100).checked_div(total).unwrap_or(100);
-        if self.interactive {
-            eprint!(
-                "\r  {key}: {percent}% ({} of {})   ",
-                format_bytes(done),
-                format_bytes(total)
-            );
-            let _ = std::io::stderr().flush();
-            self.drew.store(true, Ordering::Relaxed);
-            return;
-        }
-
-        let mut last = self
-            .last_line
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if last.is_none_or(|printed| printed.elapsed() >= LINE_PROGRESS_INTERVAL) {
-            eprintln!("  {key}: {percent}%");
-            *last = Some(Instant::now());
-        }
-    }
-
-    fn finished(&self, _key: &EntryKey, _elapsed: Duration) {
-        if self.drew.swap(false, Ordering::Relaxed) {
-            eprintln!();
-        }
-    }
-}
-
-/// Format a byte count for people, such as `637.2 MB`.
-pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
 }
 
 /// Return the roots of the bundles that must be on local disk for
@@ -883,37 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_variable_beats_the_legacy_switch() {
-        assert!(!settings(&[("ENVOY_CACHE", "off")]).enabled);
-        assert!(!settings(&[("ENVOY_DISABLE_BUNDLE_CACHE", "1")]).enabled);
-
-        let explicit = settings(&[("ENVOY_CACHE", "on"), ("ENVOY_DISABLE_BUNDLE_CACHE", "1")]);
-        assert!(explicit.enabled);
-        assert_eq!(explicit.enabled_by, "ENVOY_CACHE");
-    }
-
-    #[test]
-    fn the_root_comes_from_the_most_specific_setting() {
-        let root = |pairs: &[(&str, &str)]| settings(pairs).root;
-
-        assert_eq!(
-            root(&[
-                ("ENVOY_CACHE_ROOT", "/new"),
-                ("ENVOY_BUNDLE_CACHE", "/legacy")
-            ]),
-            PathBuf::from("/new")
-        );
-        assert_eq!(
-            root(&[("ENVOY_BUNDLE_CACHE", "/legacy")]),
-            PathBuf::from("/legacy")
-        );
-        assert_eq!(
-            root(&[("ENVOY_CACHE_ROOT", "  ")]).file_name().unwrap(),
-            "cache"
-        );
-    }
-
-    #[test]
     fn retention_settings_are_read_and_bad_values_fall_back() {
         let tuned = settings(&[
             ("ENVOY_CACHE_MAX_IDLE_DAYS", "7"),
@@ -931,7 +773,7 @@ mod tests {
     }
 
     #[test]
-    fn sizes_and_switches_parse() {
+    fn sizes_parse() {
         for (text, bytes) in [
             ("1024", 1024),
             ("2KB", 2048),
@@ -943,16 +785,29 @@ mod tests {
         for text in ["", "GB", "12 parsecs", "-5"] {
             assert_eq!(parse_size(text), None, "{text}");
         }
-        assert_eq!(parse_switch(" On "), Some(true));
-        assert_eq!(parse_switch("NO"), Some(false));
-        assert_eq!(parse_switch("maybe"), None);
+    }
+
+    /// The shim cannot depend on this crate, so it finds the config root with
+    /// the store's copy of this rule. The two must never drift apart.
+    #[test]
+    fn the_app_and_the_shim_agree_on_the_config_root() {
+        let _lock = crate::env_test_lock::MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+
+        assert_eq!(
+            config_root(),
+            envoy_store::settings::config_root(&|name| std::env::var_os(name))
+        );
     }
 
     #[test]
-    fn bytes_are_formatted_for_people() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1536), "1.5 KB");
-        assert_eq!(format_bytes(668_150_000), "637.2 MB");
+    fn the_switches_and_the_root_reach_the_settings_unchanged() {
+        let off = settings(&[("ENVOY_CACHE", "off"), ("ENVOY_CACHE_ROOT", "/elsewhere")]);
+
+        assert!(!off.enabled);
+        assert_eq!(off.enabled_by, "ENVOY_CACHE");
+        assert_eq!(off.root, PathBuf::from("/elsewhere"));
     }
 
     fn published(root: &Path, namespace: &str, name: &str, version: &str) -> BundleInfo {
