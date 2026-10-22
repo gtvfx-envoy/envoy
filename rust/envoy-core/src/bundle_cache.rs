@@ -610,10 +610,9 @@ pub fn open_default_bundle_cache(use_user_config: bool) -> Option<BundleCache> {
     match BundleCache::new(&dir) {
         Ok(cache) => Some(cache),
         Err(error) => {
-            eprintln!(
-                "Warning: failed to open bundle cache at {}: {}",
-                dir.display(),
-                error
+            tracing::warn!(
+                cache_dir = %dir.display(),
+                "Failed to open bundle cache: {error}"
             );
             None
         }
