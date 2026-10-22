@@ -16,7 +16,9 @@ SEMVER_PATTERN = re.compile(
     r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
     r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
-WORKSPACE_PACKAGE_NAMES = {"envoy-cli", "envoy-core", "envoy-py"}
+WORKSPACE_PACKAGE_NAMES = {"envoy-cli", "envoy-core", "envoy-py", "envoy-store"}
+# Crates whose sources reach Envoy Utils: it depends on envoy-core, which depends on envoy-store.
+UTILS_REACHABLE_CRATES = ("envoy-core", "envoy-store")
 DIRECT_UTILS_APIS = (
     "envoy_core::discovery::{discover_bundles_auto, Bundle}",
     "envoy_core::stack::Stack",
@@ -181,7 +183,10 @@ def classifyImpact(repository_root: Path, base_revision: str, head_revision: str
     relevant_files = [
         file_path
         for file_path in changed_files
-        if file_path.startswith("rust/envoy-core/src/") or file_path == "rust/envoy-core/Cargo.toml"
+        if any(
+            file_path.startswith(f"rust/{crate}/src/") or file_path == f"rust/{crate}/Cargo.toml"
+            for crate in UTILS_REACHABLE_CRATES
+        )
     ]
     if "rust/Cargo.lock" in changed_files and lockfileHasDependencyChanges(
         repository_root,
