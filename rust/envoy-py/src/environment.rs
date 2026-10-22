@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use envoy_core::bundle_cache::open_default_bundle_cache;
-use envoy_core::runtime::{is_raw_path, load_registry, prepare_env};
+use envoy_core::bundle_store::load_registry_for_run;
+use envoy_core::runtime::{is_raw_path, prepare_env};
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
@@ -268,13 +268,10 @@ fn build_environment(
         return Ok(CachedEnv { env });
     }
 
-    // Load registry and build environment through the standard path
-    let (registry, bundles) = load_registry(
-        bundle_roots,
-        commands_file,
-        open_default_bundle_cache(true).as_ref(),
-    )
-    .map_err(|e| PyValueError::new_err(format!("Failed to load registry: {}", e)))?;
+    // Load registry and build environment through the standard path. The
+    // environment is for running, so the bundles it needs come from the store.
+    let (registry, bundles) = load_registry_for_run(bundle_roots, commands_file, command, None)
+        .map_err(|e| PyValueError::new_err(format!("Failed to load registry: {}", e)))?;
 
     let (env, _command_definition) = prepare_env(
         command,

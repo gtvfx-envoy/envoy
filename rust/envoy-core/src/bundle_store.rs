@@ -587,6 +587,46 @@ pub fn standing(bundle: &BundleInfo, store: Option<&Store>) -> Standing {
     }
 }
 
+/// Load the registry for a caller that is about to run `command`, with the
+/// bundles it needs coming from the local store.
+///
+/// This is `envoy COMMAND` for in-process callers such as the Python API.
+/// Callers that only look at a command should use
+/// [`load_registry`](crate::runtime::load_registry) directly, so that looking
+/// never copies anything.
+pub fn load_registry_for_run(
+    bundle_roots: Option<&[String]>,
+    commands_file: Option<&Path>,
+    command: &str,
+    env_override: Option<&str>,
+) -> crate::error::Result<(CommandRegistry, Option<Vec<BundleInfo>>)> {
+    load_registry_for_run_with(
+        bundle_roots,
+        commands_file,
+        command,
+        env_override,
+        &CacheSettings::resolve(true),
+    )
+}
+
+/// [`load_registry_for_run`] with the caching settings supplied.
+pub fn load_registry_for_run_with(
+    bundle_roots: Option<&[String]>,
+    commands_file: Option<&Path>,
+    command: &str,
+    env_override: Option<&str>,
+    settings: &CacheSettings,
+) -> crate::error::Result<(CommandRegistry, Option<Vec<BundleInfo>>)> {
+    let (registry, bundles) = crate::runtime::load_registry(bundle_roots, commands_file, None)?;
+    Ok(cache_for_command(
+        registry,
+        bundles,
+        command,
+        env_override,
+        settings,
+    ))
+}
+
 /// Run the bundles `command_name` needs from the local store.
 ///
 /// Returns the registry and bundles to run with. They are returned unchanged
