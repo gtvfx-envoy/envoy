@@ -6,8 +6,8 @@
 use std::time::SystemTime;
 
 use envoy_core::bundle_store::{
-    existing_store, format_bytes, last_prune, open_store, summarize, warm, warm_command,
-    CacheSettings, Health, ProgressPrinter, PrunePolicy, WarmReport,
+    existing_store, format_bytes, last_prune, on_network, open_store, summarize, warm,
+    warm_command, CacheSettings, Health, ProgressPrinter, PrunePolicy, WarmReport,
 };
 use envoy_core::commands::CommandRegistry;
 use envoy_core::discovery::BundleInfo;
@@ -54,6 +54,12 @@ pub(crate) fn run_action(action: &str, options: &[String], settings: &CacheSetti
 
 fn status(settings: &CacheSettings) -> i32 {
     println!("Cache directory: {}", settings.root.display());
+    if on_network(&settings.root) {
+        println!(
+            "Warning: this directory is on a network location, so a cache here saves little and \
+file locks may be unreliable. Point ENVOY_CACHE_ROOT at a local disk."
+        );
+    }
     println!(
         "Caching: {} (set by {})",
         if settings.enabled { "on" } else { "off" },

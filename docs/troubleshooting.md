@@ -31,6 +31,7 @@ below.
 | The first run of a command is slow | Expected: bundles are copied once. Warm a machine ahead of time with `en --noop` |
 | A cached bundle misbehaves | `en cache verify` checks each entry is complete. Delete a damaged entry's directory, or run `en cache clear`; envoy copies it again |
 | You want to bypass the cache once | `en --cache off <command>` runs from the share and copies nothing |
+| `warning: this directory is on a network location` | The cache directory is on a network location, where a cache saves little and file locks can be unreliable (often a home directory mounted over NFS). Point `ENVOY_CACHE_ROOT` at a local disk |
 
 See [Bundle Caching](caching.md) for the whole picture.
 

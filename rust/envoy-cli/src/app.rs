@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use envoy_core::bundle_store::{
-    cache_for_command, existing_store, format_bytes, parse_switch, standing, summarize,
+    cache_for_command, existing_store, format_bytes, on_network, parse_switch, standing, summarize,
     CacheSettings, Standing,
 };
 use envoy_core::commands::{find_commands_file, CommandDefinition, CommandRegistry};
@@ -842,6 +842,12 @@ fn run_diagnose(
             cache.root.display(),
             cache.enabled_by
         );
+        if on_network(&cache.root) {
+            println!(
+                "  warning: this directory is on a network location, so a cache here saves little \
+and file locks may be unreliable; point ENVOY_CACHE_ROOT at a local disk"
+            );
+        }
         match summarize(cache) {
             Some(summary) => {
                 println!(

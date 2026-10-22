@@ -695,6 +695,78 @@ pub fn existing_store(settings: &CacheSettings) -> Option<Store> {
     Store::open_existing(&settings.root).ok().flatten()
 }
 
+/// Filesystem types that live on another machine.
+#[cfg(any(target_os = "linux", test))]
+const NETWORK_FILESYSTEMS: [&str; 11] = [
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "smbfs",
+    "afs",
+    "ceph",
+    "glusterfs",
+    "lustre",
+    "9p",
+    "davfs",
+];
+
+/// Whether `path` lies on a network location.
+///
+/// A cache there saves little, since every read still crosses the network, and
+/// file locks, which keep envoys from filling the same entry at once, are not
+/// reliable on some network filesystems.
+#[cfg(windows)]
+pub fn on_network(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    // `\\?\C:\...` is a local path in its long form.
+    (text.starts_with(r"\\") && !text.starts_with(r"\\?\")) || text.starts_with(r"\\?\UNC\")
+}
+
+/// Whether `path` lies on a network location (see the Windows version).
+#[cfg(target_os = "linux")]
+pub fn on_network(path: &Path) -> bool {
+    std::fs::read_to_string("/proc/self/mounts")
+        .is_ok_and(|mounts| is_on_network_mount(path, &mounts))
+}
+
+/// Whether `path` lies on a network location (see the Windows version).
+///
+/// Not detected on this platform.
+#[cfg(not(any(windows, target_os = "linux")))]
+pub fn on_network(_path: &Path) -> bool {
+    false
+}
+
+/// Whether the mount holding `path`, as listed in `mounts` (the text of
+/// `/proc/self/mounts`), is a network filesystem.
+///
+/// The longest mount point that is a prefix of `path` is the one that holds it.
+#[cfg(any(target_os = "linux", test))]
+fn is_on_network_mount(path: &Path, mounts: &str) -> bool {
+    let mut holder: Option<(usize, &str)> = None;
+
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_device), Some(mount_point), Some(file_system)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+
+        // The kernel writes a space in a mount point as \040.
+        let mount_point = mount_point.replace("\\040", " ");
+        if path.starts_with(&mount_point) {
+            let length = mount_point.len();
+            if holder.is_none_or(|(longest, _)| length >= longest) {
+                holder = Some((length, file_system));
+            }
+        }
+    }
+
+    holder.is_some_and(|(_, file_system)| NETWORK_FILESYSTEMS.contains(&file_system))
+}
+
 /// When the store was last pruned in the background, if it ever was.
 pub fn last_prune(settings: &CacheSettings) -> Option<SystemTime> {
     std::fs::metadata(settings.root.join(LAST_PRUNE_FILE))
@@ -1062,6 +1134,40 @@ mod tests {
 
         assert_eq!(cached, vec![info]);
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn a_mount_is_judged_by_the_longest_mount_point_that_holds_the_path() {
+        let mounts = "\
+rootfs / ext4 rw 0 0
+server:/export /home nfs4 rw 0 0
+/dev/sdb1 /home/me/local ext4 rw 0 0
+//nas/share /mnt/with\\040space cifs rw 0 0
+";
+
+        assert!(is_on_network_mount(
+            Path::new("/home/someone/.envoy/cache"),
+            mounts
+        ));
+        assert!(
+            !is_on_network_mount(Path::new("/home/me/local/.envoy/cache"), mounts),
+            "a local disk mounted inside a network home is local"
+        );
+        assert!(!is_on_network_mount(Path::new("/var/cache/envoy"), mounts));
+        assert!(is_on_network_mount(
+            Path::new("/mnt/with space/cache"),
+            mounts
+        ));
+        assert!(!is_on_network_mount(Path::new("relative/cache"), mounts));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_unc_path_is_on_the_network_and_a_long_local_path_is_not() {
+        assert!(on_network(Path::new(r"\\server\share\cache")));
+        assert!(on_network(Path::new(r"\\?\UNC\server\share\cache")));
+        assert!(!on_network(Path::new(r"\\?\C:\Users\me\.envoy\cache")));
+        assert!(!on_network(Path::new(r"C:\Users\me\.envoy\cache")));
     }
 
     #[test]
