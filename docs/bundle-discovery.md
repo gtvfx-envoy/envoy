@@ -96,6 +96,14 @@ Every bundle published through
 
 After extracting a published zip under a bundle root, envoy discovers it automatically — no `studio.estack` required.
 
+### Version ordering
+
+Bundle versions follow SemVer, with one convention: the prerelease label `envoy` is reserved for **packaging revisions** of third-party software. `3.11.9-envoy.2` is the second repackaging of Python 3.11.9. A revision sorts *after* the version it repackages and counts as stable. Any other label (`alpha`, `rc`) marks a prerelease that sorts *before* the release:
+
+```
+3.11.9-rc.1  <  3.11.9  <  3.11.9-envoy.1  <  3.11.9-envoy.2  <  3.11.10
+```
+
 ## Method 2 — Runtime Stack
 
 Create a strict YAML `studio.estack` and pass it with `--stack` / `-s`:
