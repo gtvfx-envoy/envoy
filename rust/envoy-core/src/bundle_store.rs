@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-use envoy_store::{EntryKey, Lease, Observer, Outcome, PrunePolicy, Store};
+use envoy_store::{EntryKey, Lease, Observer, Outcome, PrunePolicy, Store, StoreError};
 
 use crate::commands::CommandRegistry;
 use crate::discovery::{is_published_bundle, Bundle, BundleInfo, BUNDLE_CHECKOUT};
@@ -347,10 +347,30 @@ pub fn cache_bundles(
     store: &Store,
     observer: &dyn Observer,
 ) -> Vec<BundleInfo> {
+    let published = published_roots(&bundles, needed);
+    cache_published(bundles, &published, store, observer)
+}
+
+/// The roots among `needed` that belong to published bundles, the only ones
+/// the store can hold.
+fn published_roots(bundles: &[BundleInfo], needed: &HashSet<PathBuf>) -> HashSet<PathBuf> {
+    bundles
+        .iter()
+        .filter(|bundle| needed.contains(&bundle.root) && is_published_bundle(&bundle.root))
+        .map(|bundle| bundle.root.clone())
+        .collect()
+}
+
+fn cache_published(
+    bundles: Vec<BundleInfo>,
+    published: &HashSet<PathBuf>,
+    store: &Store,
+    observer: &dyn Observer,
+) -> Vec<BundleInfo> {
     bundles
         .into_iter()
         .map(|bundle| {
-            if needed.contains(&bundle.root) && is_published_bundle(&bundle.root) {
+            if published.contains(&bundle.root) {
                 cache_one(bundle, store, observer)
             } else {
                 bundle
@@ -388,11 +408,27 @@ fn cache_one(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Bund
             BundleInfo::new(ensured.path, bundle.name.clone(), bundle.namespace.clone())
         }
         Err(error) => {
-            tracing::warn!(
-                bundle_id = %bndlid,
-                "Could not cache {key}, so it loads from {}: {error}",
-                bundle.root.display()
-            );
+            match error {
+                // Reported on an earlier run; the bundle still runs from its source.
+                StoreError::PathTooLong {
+                    remembered: true, ..
+                } => tracing::debug!(
+                    bundle_id = %bndlid,
+                    "Not cached, loads from {}: {error}",
+                    bundle.root.display()
+                ),
+                StoreError::PathTooLong { .. } => tracing::warn!(
+                    bundle_id = %bndlid,
+                    "Could not cache {key}, so it loads from {}: {error}. A shorter cache \
+                directory, set with ENVOY_CACHE_ROOT, would fit it",
+                    bundle.root.display()
+                ),
+                _ => tracing::warn!(
+                    bundle_id = %bndlid,
+                    "Could not cache {key}, so it loads from {}: {error}",
+                    bundle.root.display()
+                ),
+            }
             bundle
         }
     }
@@ -402,6 +438,8 @@ fn cache_one(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Bund
 ///
 /// Returns the registry and bundles to run with. They are returned unchanged
 /// when caching is off, the store cannot be opened, or nothing needed caching.
+/// A run that needs only checkouts and unpublished bundles never touches the
+/// store, so it is not even created for someone who has no use for it.
 pub fn cache_for_command(
     registry: CommandRegistry,
     bundles: Option<Vec<BundleInfo>>,
@@ -412,17 +450,21 @@ pub fn cache_for_command(
     let Some(bundle_list) = bundles else {
         return (registry, None);
     };
+    if !settings.enabled {
+        return (registry, Some(bundle_list));
+    }
+
+    let needed = contributing_roots(&registry, command_name, env_override, &bundle_list);
+    let published = published_roots(&bundle_list, &needed);
+    if published.is_empty() {
+        return (registry, Some(bundle_list));
+    }
     let Some(store) = open_store(settings) else {
         return (registry, Some(bundle_list));
     };
 
-    let needed = contributing_roots(&registry, command_name, env_override, &bundle_list);
-    if needed.is_empty() {
-        return (registry, Some(bundle_list));
-    }
-
     let printer = ProgressPrinter::new();
-    let cached = cache_bundles(bundle_list.clone(), &needed, &store, &printer);
+    let cached = cache_published(bundle_list.clone(), &published, &store, &printer);
     if cached == bundle_list {
         prune_in_background(store, settings);
         return (registry, Some(bundle_list));
@@ -720,6 +762,37 @@ mod tests {
         assert!(
             !off.root.exists(),
             "an off switch must not even create the store"
+        );
+    }
+
+    #[test]
+    fn a_run_that_needs_only_checkouts_never_creates_the_store() {
+        let temp = tempdir().expect("tempdir is created");
+        let checkout = temp.path().join("gt").join("dev");
+        fs::create_dir_all(checkout.join(".envoy")).expect("checkout is created");
+        fs::write(
+            checkout.join(".envoy").join("commands.json"),
+            r#"{"dev": {"environment": []}}"#,
+        )
+        .expect("commands are written");
+        let bundles = vec![BundleInfo::new(
+            checkout,
+            "dev".to_string(),
+            "gt".to_string(),
+        )];
+        let mut registry = CommandRegistry::empty();
+        registry.load_from_bundles(&bundles);
+        let on = CacheSettings {
+            root: temp.path().join("store"),
+            ..settings(&[])
+        };
+
+        let (_, unchanged) = cache_for_command(registry, Some(bundles.clone()), "dev", None, &on);
+
+        assert_eq!(unchanged, Some(bundles));
+        assert!(
+            !on.root.exists(),
+            "there is nothing to cache, so the store is not created"
         );
     }
 

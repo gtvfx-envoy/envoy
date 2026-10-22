@@ -54,12 +54,20 @@ fn base_command() -> Command {
         .env_remove("ENVOY_TELEMETRY_ENABLED")
         .env_remove("ENVOY_TELEMETRY_ENDPOINT")
         .env_remove("ENVOY_TELEMETRY_REDACT_ARGS")
+        .env_remove("ENVOY_CACHE_ROOT")
+        .env_remove("ENVOY_CACHE_MAX_IDLE_DAYS")
+        .env_remove("ENVOY_CACHE_MAX_SIZE")
+        .env_remove("ENVOY_BUNDLE_CACHE")
+        .env_remove("ENVOY_DISABLE_BUNDLE_CACHE")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TIMEOUT")
         .env_remove("OTEL_SERVICE_NAME")
-        .env_remove("OTEL_RESOURCE_ATTRIBUTES");
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        // Caching is off unless a test turns it on with a root of its own, so no
+        // test writes to the real home directory.
+        .env("ENVOY_CACHE", "off");
     command
 }
 
@@ -548,6 +556,7 @@ fn listing_commands_never_copies_a_bundle() {
         .arg("--stack")
         .arg(&stack)
         .arg("--list")
+        .env("ENVOY_CACHE", "on")
         .env("ENVOY_CACHE_ROOT", &cache_root)
         .assert()
         .success();
@@ -568,6 +577,7 @@ fn a_command_runs_from_a_cached_copy_of_only_the_bundles_it_uses() {
             .arg("--stack")
             .arg(&stack)
             .arg("show")
+            .env("ENVOY_CACHE", "on")
             .env("ENVOY_CACHE_ROOT", &cache_root)
             .assert()
             .success()
@@ -632,6 +642,7 @@ fn an_unusable_cache_falls_back_to_the_share_with_one_warning() {
         .arg("--stack")
         .arg(&stack)
         .arg("show")
+        .env("ENVOY_CACHE", "on")
         .env("ENVOY_CACHE_ROOT", blocker.join("cache"))
         .assert()
         .success();

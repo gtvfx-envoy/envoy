@@ -2,7 +2,7 @@
 
 Published bundles usually live on a network share. Reading a Python install or a Qt distribution over the network makes every start slow, and stops working when the share is unreachable. Envoy copies the bundles a command uses to local disk the first time it needs them, then runs from that copy.
 
-Your own checkouts are never cached: a bundle without a `.bundle` marker always runs from where it is.
+Your own checkouts are never cached: a bundle without a `.bundle` marker always runs from where it is. A run that needs only such bundles does not even create the cache directory.
 
 ## What happens on the first run
 
@@ -57,7 +57,7 @@ A bundle runs from the share instead of the cache when:
 
 - **It has no `.bundle` marker.** The marker is what gives a bundle its identity and version. Bundles copied to the share by hand, without publishing them through `engit publish bundle`, have none.
 - **Its marker states no usable version.** A version must be made of letters, digits, `.`, `_`, `+`, and `-`.
-- **A path inside it is too long for Windows.** The longest path under the cache must stay within 250 characters. Pick a shorter cache directory with `ENVOY_CACHE_ROOT`, or publish the bundle with shorter paths.
+- **A path inside it is too long for Windows.** The longest path under the cache must stay within 250 characters. Envoy warns once, remembers the answer, and runs the bundle from the share without checking again; the note is forgotten when the cache is cleared or the bundle goes unused for the idle period. Pick a shorter cache directory with `ENVOY_CACHE_ROOT`, or publish the bundle with shorter paths. The default `C:\Users\<you>\.envoy\cache` leaves room for the largest bundles in a typical studio, but a much longer directory, such as one under `%TEMP%`, may not.
 - **There is not enough free space** on the drive holding the cache.
 - **The cache directory cannot be used**, for example because it is read-only.
 
