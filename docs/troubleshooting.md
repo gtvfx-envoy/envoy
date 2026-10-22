@@ -10,10 +10,29 @@ en --diagnose python    # also shows the command's full resolved environment
 ```
 
 This surfaces discovered bundles and commands, resolved team/stack context,
-bundle cache location and reachability, detected VCS backend, and
+bundle cache location and state (with how each bundle stands with it),
+detected VCS backend, and
 bundle-root reachability (flagging unreachable network paths) in one report —
 often enough to spot the problem before checking the more specific sections
 below.
+
+## A Bundle Is Not Being Cached, or the Cache Misbehaves
+
+`en --diagnose` shows beside each bundle whether it is `[cached]`,
+`[not cached yet]`, `[refused: ...]` or `[never cached: ...]`, and why.
+`en cache status` shows where the cache is and whether caching is on.
+
+| What you see | What it means |
+|---|---|
+| `[never cached: it has no .bundle marker ...]` | The bundle was copied to the share by hand. Publish it with `engit publish bundle`, which writes the marker |
+| `[refused: ... would reach N characters ...]` | A path in the bundle is too long for Windows under the cache directory. Choose a shorter one with `ENVOY_CACHE_ROOT` (or `--cache-root`), or publish the bundle with shorter paths |
+| `Bundle caching is unavailable` warning | The cache directory cannot be created or written, for example because it is read-only. Envoy runs from the share meanwhile; point `ENVOY_CACHE_ROOT` somewhere writable |
+| `Could not cache ... not enough free space` | The drive holding the cache is full. `en cache list` shows what is using it; `en cache prune` or `en cache clear` frees it, and `ENVOY_CACHE_MAX_SIZE` keeps it bounded |
+| The first run of a command is slow | Expected: bundles are copied once. Warm a machine ahead of time with `en --noop` |
+| A cached bundle misbehaves | `en cache verify` checks each entry is complete. Delete a damaged entry's directory, or run `en cache clear`; envoy copies it again |
+| You want to bypass the cache once | `en --cache off <command>` runs from the share and copies nothing |
+
+See [Bundle Caching](caching.md) for the whole picture.
 
 ## "Could not find commands.json"
 

@@ -45,11 +45,38 @@ The version is exactly the one in the bundle's `.bundle` marker, so `v0.7.0` and
 
 Caching is on unless something turns it off. The order is `ENVOY_CACHE`, then `ENVOY_DISABLE_BUNDLE_CACHE`, then the `cache` user setting. `--ignore-config` skips the user settings for one run.
 
+Three flags change the settings for a single run, and beat everything above: `--cache on|off`, `--cache-root PATH`, and `--no-prune` (see [the CLI reference](cli-reference/envoy.md#cache-management)).
+
+## Warming a machine ahead of time
+
+The first run of a command copies what it needs, which can take a few seconds to a minute on a slow share. To pay that cost in advance, for example from a login script or a scheduled task, warm the cache:
+
+```powershell
+en -s=studio --noop            # every published bundle in the stack
+en -s=studio --noop python     # only what python needs
+```
+
+Nothing is launched. Bundles already in the cache are skipped, so running it again is quick. It exits with `1` if a bundle could not be cached, so a scheduled run shows up as failed.
+
+## Looking after the cache
+
+```powershell
+en cache status               # where it is, what is in it, when it was last pruned
+en cache list                 # every entry, its size, when it was last used
+en cache verify               # check each entry is complete
+en cache prune --dry-run      # what the cleanup below would remove
+en cache clear                # remove everything that is not in use
+```
+
+`verify` compares each entry with what was recorded when it was copied: no file missing or added, and the sizes add up. It does not read file contents. A damaged entry is fixed by deleting its directory (or `en cache clear`); envoy copies it again the next time it is needed.
+
+These commands work on the cache directory alone, so they are fast and need no stack.
+
 ## Cleaning up
 
 A bundle that nothing has used for 30 days (or `ENVOY_CACHE_MAX_IDLE_DAYS`) is removed. When a size limit is set, the least recently used bundles are removed until the cache fits.
 
-Envoy does this itself: at most once a day it prunes in the background while your command runs, and it never removes a bundle that a running envoy is using. There is nothing to schedule. To clear everything, delete the cache directory. The next run copies what it needs again.
+Envoy does this itself: at most once a day it prunes in the background while your command runs (skip it with `--no-prune`), and it never removes a bundle that a running envoy is using. There is nothing to schedule. `en cache prune` runs the same cleanup on demand.
 
 ## Bundles that are not cached
 
@@ -61,7 +88,7 @@ A bundle runs from the share instead of the cache when:
 - **There is not enough free space** on the drive holding the cache.
 - **The cache directory cannot be used**, for example because it is read-only.
 
-`envoy --diagnose` shows where the cache is, whether it is on, what turned it on or off, and how much it holds.
+`envoy --diagnose` shows where the cache is, whether it is on, what turned it on or off, how much it holds, and beside each bundle whether it is `[cached]`, `[not cached yet]`, `[refused: ...]` or `[never cached: ...]` and why.
 
 ## Several users or processes
 

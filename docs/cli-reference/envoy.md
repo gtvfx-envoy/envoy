@@ -7,6 +7,7 @@ The `envoy` command (and its short alias `en`) launches managed subprocesses wit
 ```
 envoy [OPTIONS] [command] [args ...]
 en    [OPTIONS] [command] [args ...]
+envoy cache ACTION [--dry-run]
 ```
 
 !!! note "Flag position matters"
@@ -37,6 +38,10 @@ en    [OPTIONS] [command] [args ...]
 | `--shell` | | Drop into an interactive shell inside a command's resolved environment, instead of running it |
 | `--inherit-env` | `-i` | Inherit the full system environment (overrides closed mode) |
 | `--verbose` | `-v` | Enable verbose logging |
+| `--noop` | | Copy the bundles `COMMAND` needs (every published bundle when no command is given) into the [bundle cache](../caching.md), then exit without running anything |
+| `--cache on\|off` | | Turn bundle caching on or off for this run |
+| `--cache-root PATH` | | Use `PATH` as the bundle cache directory for this run |
+| `--no-prune` | | Do not prune the bundle cache in the background during this run |
 | `--trace VAR` | | Trace how `VAR` is mutated through env file processing |
 | `--diagnose [COMMAND]` | | Show bundle/team/stack/cache/VCS/telemetry diagnostics; add `COMMAND` for its full resolved environment |
 | `--docs [BUNDLE]` | | Open the envoy documentation in the default browser, or a specific bundle's own docs |
@@ -112,7 +117,9 @@ en --verbose python script.py
 
 Show a full diagnostic report: discovered bundles and commands, resolved
 the current Stack and team config (`.envoy/team.json`),
-bundle cache location and state, detected VCS backend (Git,
+bundle cache location and state (and, beside each bundle, whether it is
+cached, not cached yet, refused because its paths are too long for the cache
+directory, or never cached), detected VCS backend (Git,
 Perforce, or [Lore](https://github.com/EpicGames/lore)) with its pending
 change count, telemetry status, and bundle-root reachability (flagging
 network/UNC paths). Pass a command name to also see its full resolved
@@ -131,8 +138,8 @@ envoy diagnose
 Target: linux/x86_64
 
 Bundles discovered: 2
-  - gt:pythoncore            R:/repo/gtvfx-envoy/pythoncore
-  - gt:unreal                R:/repo/gtvfx-envoy/unreal
+  - gt:pythoncore            R:/repo/gtvfx-envoy/pythoncore  [not cached yet]
+  - gt:unreal                R:/repo/gtvfx-envoy/unreal  [never cached: it has no .bundle marker (a checkout or an unpublished bundle)]
 
 Commands registered: 3
   python, unreal, vscode
@@ -209,6 +216,56 @@ launches the shell reported by that environment's own `COMSPEC`/`SHELL`
 (falling back to the current process's, then a platform default). Type
 `exit` to return. Combine with `--env`/`-e` to inspect a *different*
 command's environment than the one named.
+
+## Cache Management
+
+Published bundles are copied to a local [cache](../caching.md) the first time a command needs them. These commands look after it. Apart from `warm`, they work on the cache directory alone: they need no stack, are fast, and never create a cache that is not there.
+
+`cache` is treated as the cache command only when one of the actions below follows it. A bundle's own `cache` command keeps working with any other argument.
+
+| Command | What it does |
+|---|---|
+| `envoy cache status` | Where the cache is, whether caching is on and what decided that, how many entries and how much space, bundles that do not fit, and when it was last pruned |
+| `envoy cache list` | Every entry with its size and when it was last used |
+| `envoy cache verify` | Check each entry against what was recorded when it was copied: nothing missing, nothing extra, sizes add up. Exits `1` when an entry is damaged. It does not read file contents |
+| `envoy cache prune [--dry-run]` | Remove entries unused for the idle period (`ENVOY_CACHE_MAX_IDLE_DAYS`, default 30 days), and the least recently used beyond `ENVOY_CACHE_MAX_SIZE` if set. Never removes an entry a running envoy is using |
+| `envoy cache clear [--dry-run]` | Remove every entry that is not in use. Envoy copies again what it needs next time |
+| `envoy cache warm [COMMAND]` | Same as `envoy --noop [COMMAND]` |
+
+```powershell
+en cache status
+en cache prune --dry-run
+```
+
+### `--noop [COMMAND]`
+
+Warm the cache ahead of time. `envoy --noop` resolves the stack and copies every published bundle in it into the cache, then exits without launching anything. With a command, `envoy --noop COMMAND` copies only the bundles that command needs, and reports an error if it does not exist.
+
+```powershell
+en -s=studio --noop            # everything in the stack
+en -s=studio --noop python     # only what python needs
+```
+
+```
+Cache directory: C:\Users\you\.envoy\cache
+Copied 6 bundles (792.6 MB), 0 already cached
+Never cached: 1 bundle
+  despatch:v0.2.0: it has no .bundle marker (a checkout or an unpublished bundle)
+```
+
+The exit code is `1` when a bundle could not be cached, so a scheduled warm-up shows up as failed. Bundles that are never cached (checkouts, unmarked bundles) are listed but do not fail it. With caching off it says so and exits `0`.
+
+### `--cache`, `--cache-root`, `--no-prune`
+
+Per-run overrides of the [cache settings](../caching.md#settings). They go before the command name like every other envoy flag:
+
+```powershell
+en --cache off python          # run from the share, copy nothing
+en --cache-root D:\envoy_cache python
+en --no-prune python           # skip the background prune this run
+```
+
+`--cache on|off` beats `ENVOY_CACHE`, the older switch, and the `cache` user setting.
 
 ## Discovery Flags
 
