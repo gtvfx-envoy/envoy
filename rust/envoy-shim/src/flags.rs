@@ -9,6 +9,7 @@
 //! | `--envoy-shim-resolve` | Show which version this user gets, and why |
 //! | `--envoy-shim-validate-config FILE` | Check a redirect file before it is published |
 //! | `--envoy-shim-prefetch [VERSION]` | Cache a version now, for use offline later |
+//! | `--envoy-shim-update` | Look for a newer shim on the share now, and install it |
 //! | `--envoy-shim-help` | Show this list |
 
 use std::ffi::OsString;
@@ -20,7 +21,7 @@ use envoy_store::{format_bytes, ProgressPrinter, Store};
 use crate::app::{self, Found};
 use crate::error::{EXIT_CONFIG, EXIT_USAGE};
 use crate::source::Origin;
-use crate::{decide, fail, how_long, VERSION};
+use crate::{decide, fail, how_long, update, VERSION};
 
 /// What marks an argument as meant for the shim.
 pub const PREFIX: &str = "--envoy-shim-";
@@ -32,6 +33,7 @@ envoy shim options (only as the first argument; everything else goes to envoy):
   --envoy-shim-validate-config FILE    check a redirect file; add --check-sources
                                        to look for each version on the sources
   --envoy-shim-prefetch [VERSION]      cache a version now, for use offline
+  --envoy-shim-update                  look for a newer shim on the share now
   --envoy-shim-help                    show this list";
 
 /// Run the shim option `flag` with the arguments that follow it.
@@ -48,6 +50,7 @@ pub fn run(flag: &str, rest: &[OsString], env: &dyn Fn(&str) -> Option<String>) 
         "--envoy-shim-resolve" => resolve(env),
         "--envoy-shim-validate-config" => validate(rest, env),
         "--envoy-shim-prefetch" => prefetch(rest, env),
+        "--envoy-shim-update" => update::run_now(env),
         _ => {
             eprintln!("envoy: unknown option {flag}; try --envoy-shim-help");
             EXIT_USAGE
@@ -104,6 +107,7 @@ fn resolve(env: &dyn Fn(&str) -> Option<String>) -> i32 {
             format!("off, set by {}", decision.location.enabled_by)
         }
     );
+    println!("launcher: {}", update::status(env));
     describe_app(&decision, env);
     0
 }

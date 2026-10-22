@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 envoy-config = { path = "../envoy-config" }
 envoy-store = { path = "../envoy-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Windows cannot replace a process, so the shim waits for envoy and ignores
 # Ctrl+C itself; on Unix it simply becomes envoy.

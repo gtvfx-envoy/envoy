@@ -605,6 +605,8 @@ dependencies = [
  "ctrlc",
  "envoy-config",
  "envoy-store",
+ "serde",
+ "serde_json",
  "tempfile",
  "winres",
 ]

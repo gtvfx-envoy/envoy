@@ -114,14 +114,22 @@ redirect.yaml, or ENVOY_REDIRECT_CONFIG to the file itself"
 }
 
 /// Read a file on a worker thread, giving up after `timeout`.
+pub(crate) fn read_with_timeout(path: &Path, timeout: Duration) -> io::Result<String> {
+    let path = path.to_path_buf();
+    within(timeout, move || fs::read_to_string(&path))
+}
+
+/// Run `work` on a worker thread, giving up after `timeout`.
 ///
 /// A thread that is still waiting on the share is simply left behind; it ends
 /// with the process.
-fn read_with_timeout(path: &Path, timeout: Duration) -> io::Result<String> {
+pub(crate) fn within<T: Send + 'static>(
+    timeout: Duration,
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
     let (sender, receiver) = mpsc::channel();
-    let path = path.to_path_buf();
     thread::spawn(move || {
-        let _ = sender.send(fs::read_to_string(&path));
+        let _ = sender.send(work());
     });
 
     receiver.recv_timeout(timeout).unwrap_or_else(|_| {

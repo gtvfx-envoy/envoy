@@ -23,6 +23,7 @@ mod flags;
 mod identity;
 mod launch;
 mod source;
+mod update;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ use envoy_store::settings::{self, Location};
 use envoy_store::ProgressPrinter;
 
 pub use error::ShimError;
+pub use update::TARGET;
 
 /// The version of this launcher.
 pub const VERSION: &str = env!("ENVOY_SHIM_VERSION");
@@ -123,6 +125,9 @@ fn forward(args: &[OsString], env: &dyn Fn(&str) -> Option<String>) -> i32 {
             "envoy: the redirect file could not be read ({reason}); using the copy saved {} ago",
             how_long(*age)
         );
+    } else {
+        // The share answered a moment ago, so this is a good time to ask about a newer launcher.
+        update::maybe_update(env);
     }
 
     let app = match app::ensure(

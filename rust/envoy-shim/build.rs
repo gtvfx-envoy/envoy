@@ -1,7 +1,8 @@
 //! Build script: embed the Windows icon and derive the shim's version string.
 //!
 //! The reported version comes from `git describe`, as for `envoy-cli`, and falls
-//! back to the crate version when git is not available.
+//! back to the crate version when git is not available. The target label is the
+//! one the release archives and the share's `shim/` folders use.
 
 #[cfg(windows)]
 use std::path::PathBuf;
@@ -12,8 +13,21 @@ fn main() {
 
     let version = git_describe().unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
     println!("cargo:rustc-env=ENVOY_SHIM_VERSION={version}");
+    println!("cargo:rustc-env=ENVOY_SHIM_TARGET={}", target_label());
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
+}
+
+/// `windows-x86_64`, `linux-x86_64-musl`, `macos-aarch64`, and so on.
+fn target_label() -> String {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let abi = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if os == "linux" && abi == "musl" {
+        format!("{os}-{arch}-musl")
+    } else {
+        format!("{os}-{arch}")
+    }
 }
 
 #[cfg(windows)]

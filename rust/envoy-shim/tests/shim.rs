@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
 use tempfile::{tempdir, TempDir};
 
@@ -50,6 +51,26 @@ fn exe_name() -> &'static str {
     }
 }
 
+/// The stand-in for a newer launcher that cargo builds beside the test binaries.
+fn fake_shim() -> PathBuf {
+    let name = if cfg!(windows) {
+        "fake_shim.exe"
+    } else {
+        "fake_shim"
+    };
+    let path = PathBuf::from(SHIM)
+        .parent()
+        .expect("the shim has a directory")
+        .join("examples")
+        .join(name);
+    assert!(
+        path.is_file(),
+        "{} is missing; `cargo test` builds it",
+        path.display()
+    );
+    path
+}
+
 /// A share with the given versions published, a redirect file beside it, and
 /// directories for the cache and for settings.
 struct Studio {
@@ -84,7 +105,11 @@ impl Studio {
 
     /// The shim, run as `user`, with nothing inherited from the real environment.
     fn shim(&self, user: &str) -> Command {
-        let mut command = Command::new(SHIM);
+        self.command(Path::new(SHIM), user)
+    }
+
+    fn command(&self, program: &Path, user: &str) -> Command {
+        let mut command = Command::new(program);
         command
             .env_clear()
             .env("ENVOY_USER", user)
@@ -96,6 +121,48 @@ impl Studio {
             command.env("SystemRoot", root);
         }
         command
+    }
+
+    fn bin(&self) -> PathBuf {
+        self.settings.join("bin")
+    }
+
+    /// Install a copy of the shim where the installer puts it, as `envoy` and
+    /// `en`, and return the path of `envoy`.
+    fn install_shim(&self) -> PathBuf {
+        fs::create_dir_all(self.bin()).expect("bin is created");
+        let installed = self.bin().join(exe_name());
+        fs::copy(SHIM, &installed).expect("the shim is installed");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("envoy", self.bin().join("en")).expect("en is linked");
+        #[cfg(not(unix))]
+        fs::copy(SHIM, self.bin().join("en.exe")).expect("en is installed");
+        installed
+    }
+
+    /// Publish the stand-in as launcher `version` on the share.
+    fn publish_launcher(&self, version: &str) {
+        let published = self
+            .config
+            .join("shim")
+            .join(version)
+            .join(envoy_shim::TARGET);
+        fs::create_dir_all(&published).expect("published folder is created");
+        fs::copy(fake_shim(), published.join(exe_name())).expect("launcher is published");
+        self.point_at(version);
+    }
+
+    fn point_at(&self, version: &str) {
+        fs::create_dir_all(self.config.join("shim")).expect("shim folder is created");
+        fs::write(
+            self.config.join("shim").join("current.json"),
+            format!("{{\"schema\": 1, \"version\": \"{version}\"}}\n"),
+        )
+        .expect("pointer is written");
+    }
+
+    fn stamp(&self) -> PathBuf {
+        self.settings.join("shim").join("last-check")
     }
 
     fn run(&self, user: &str, args: &[&str]) -> Output {
@@ -401,5 +468,202 @@ fn the_shim_reports_its_own_version_and_help() {
     assert_eq!(
         studio.run("bob", &["--envoy-shim-nonsense"]).status.code(),
         Some(64)
+    );
+}
+
+#[test]
+fn a_newer_launcher_on_the_share_replaces_the_installed_one() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    studio.publish_launcher("v9.9.9");
+
+    let output = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        started_from(&output).contains("v1"),
+        "this launch still runs the app"
+    );
+    assert!(
+        stderr(&output).contains("the launcher was updated to v9.9.9"),
+        "stderr was:\n{}",
+        stderr(&output)
+    );
+    let replacement = fs::read(fake_shim()).expect("the stand-in reads");
+    for name in [exe_name(), if cfg!(windows) { "en.exe" } else { "en" }] {
+        assert_eq!(
+            fs::read(studio.bin().join(name)).expect("the launcher reads"),
+            replacement,
+            "{name} was not replaced"
+        );
+    }
+    #[cfg(unix)]
+    assert!(
+        fs::symlink_metadata(studio.bin().join("en"))
+            .expect("en exists")
+            .file_type()
+            .is_symlink(),
+        "en stays a link to envoy"
+    );
+    assert!(studio.stamp().is_file());
+    assert!(
+        !studio.bin().join(".update").exists(),
+        "the staging folder is removed"
+    );
+}
+
+#[test]
+fn the_share_is_looked_at_once_a_day() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let original = fs::read(&installed).expect("the launcher reads");
+    studio.point_at("v9.9.9");
+
+    // Nothing is published yet, so the first look finds nothing to install.
+    let first = studio.command(&installed, "bob").output().expect("runs");
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(studio.stamp().is_file(), "the look is recorded");
+    assert_eq!(fs::read(&installed).expect("reads"), original);
+
+    // Published now, but the share was looked at today, so it is not looked at again.
+    studio.publish_launcher("v9.9.9");
+    let second = studio.command(&installed, "bob").output().expect("runs");
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert_eq!(fs::read(&installed).expect("reads"), original);
+
+    let yesterday = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(studio.stamp())
+        .and_then(|file| file.set_modified(yesterday))
+        .expect("the stamp is backdated");
+    let third = studio.command(&installed, "bob").output().expect("runs");
+    assert!(third.status.success(), "{}", stderr(&third));
+    assert_eq!(
+        fs::read(&installed).expect("reads"),
+        fs::read(fake_shim()).expect("the stand-in reads")
+    );
+}
+
+#[test]
+fn a_launcher_that_is_not_the_version_the_pointer_names_is_not_installed() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let original = fs::read(&installed).expect("the launcher reads");
+    studio.publish_launcher("v9.9.9");
+
+    let output = studio
+        .command(&installed, "bob")
+        .env("FAKE_SHIM_VERSION", "v1.0.0")
+        .output()
+        .expect("the shim runs");
+
+    assert!(
+        output.status.success(),
+        "a refused update never stops a launch"
+    );
+    assert_eq!(fs::read(&installed).expect("reads"), original);
+    assert!(!stderr(&output).contains("updated"), "{}", stderr(&output));
+    assert!(!studio.bin().join(".update").exists());
+}
+
+#[test]
+fn updating_can_be_switched_off() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let original = fs::read(&installed).expect("the launcher reads");
+    studio.publish_launcher("v9.9.9");
+
+    let output = studio
+        .command(&installed, "bob")
+        .env("ENVOY_SHIM_UPDATE", "off")
+        .output()
+        .expect("the shim runs");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(fs::read(&installed).expect("reads"), original);
+    assert!(!studio.stamp().exists(), "it did not even look");
+}
+
+#[test]
+fn a_launcher_that_is_not_installed_never_replaces_itself() {
+    let studio = Studio::new(&["v1"]);
+    studio.publish_launcher("v9.9.9");
+
+    let output = studio.run("bob", &[]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stderr(&output).contains("updated"), "{}", stderr(&output));
+    assert!(!studio.stamp().exists());
+}
+
+#[test]
+fn updating_by_hand_says_what_it_found() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+
+    // The pointer names the version this launcher already is.
+    let own = stdout(&studio.run("bob", &["--envoy-shim-version"]));
+    let own = own.trim().trim_start_matches("envoy-shim ");
+    studio.point_at(own);
+    let current = studio
+        .command(&installed, "bob")
+        .arg("--envoy-shim-update")
+        .output()
+        .expect("the shim runs");
+    assert!(current.status.success(), "{}", stderr(&current));
+    assert!(
+        stdout(&current).contains("is current"),
+        "{}",
+        stdout(&current)
+    );
+
+    studio.publish_launcher("v9.9.9");
+    let updated = studio
+        .command(&installed, "bob")
+        .arg("--envoy-shim-update")
+        .output()
+        .expect("the shim runs");
+    assert!(updated.status.success(), "{}", stderr(&updated));
+    assert!(
+        stdout(&updated).contains("to v9.9.9"),
+        "{}",
+        stdout(&updated)
+    );
+
+    let from_a_build = studio.run("bob", &["--envoy-shim-update"]);
+    assert!(from_a_build.status.success());
+    assert!(
+        stdout(&from_a_build).contains("does not update itself"),
+        "{}",
+        stdout(&from_a_build)
+    );
+}
+
+#[test]
+fn resolve_says_whether_the_launcher_updates_itself() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+
+    let from_a_build = stdout(&studio.run("bob", &["--envoy-shim-resolve"]));
+    assert!(
+        from_a_build.contains("not installed in")
+            && from_a_build.contains("does not update itself"),
+        "{from_a_build}"
+    );
+
+    let installed_run = studio
+        .command(&installed, "bob")
+        .arg("--envoy-shim-resolve")
+        .output()
+        .expect("the shim runs");
+    let printed = stdout(&installed_run);
+    assert!(printed.contains("installed in"), "{printed}");
+    assert!(
+        printed.contains("has not looked for an update yet"),
+        "{printed}"
     );
 }
