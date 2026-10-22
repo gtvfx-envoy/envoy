@@ -67,6 +67,7 @@ nav:
   - Core Concepts: concepts.md
   - Environment Files: env-files.md
   - Bundle Discovery: bundle-discovery.md
+  - Bundle Caching: caching.md
   - Environment Modes: environment-modes.md
   - User Configuration: user-config.md
   - Telemetry: telemetry.md

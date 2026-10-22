@@ -112,7 +112,7 @@ en --verbose python script.py
 
 Show a full diagnostic report: discovered bundles and commands, resolved
 the current Stack and team config (`.envoy/team.json`),
-bundle cache location and reachability, detected VCS backend (Git,
+bundle cache location and state, detected VCS backend (Git,
 Perforce, or [Lore](https://github.com/EpicGames/lore)) with its pending
 change count, telemetry status, and bundle-root reachability (flagging
 network/UNC paths). Pass a command name to also see its full resolved
@@ -143,7 +143,8 @@ Current stack: studio (R:/stacks/studio.estack)
 Team config: bfd
   prod_bundles_root:  \\server\bundles
 
-Bundle cache: C:\Users\you\AppData\Local\envoy\bundle_cache (reachable)
+Bundle cache: C:\Users\you\.envoy\cache (on, set by the default)
+  3 entries, 781.9 MB
 
 VCS detected: git at R:/repo/gtvfx-envoy
   0 pending change(s)
@@ -295,8 +296,12 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_STACK_CONTEXT` | Colon-separated context used for most-specific namespace matching |
 | `ENVOY_ALLOWLIST` | Semicolon- or comma-separated variable names to pass through in closed mode |
 | `ENVOY_CONFIG_ROOT` | Absolute directory replacing the shared `~/.envoy` config root; the user config is stored at `<root>/user_config.json` |
-| `ENVOY_BUNDLE_CACHE` | Override the local bundle cache directory |
-| `ENVOY_DISABLE_BUNDLE_CACHE` | Set to `1`/`true`/`yes` to disable the bundle cache entirely |
+| `ENVOY_CACHE` | `on` or `off`: turn [bundle caching](../caching.md) on or off. Wins over every other caching setting |
+| `ENVOY_CACHE_ROOT` | Directory holding the bundle cache (default `~/.envoy/cache`) |
+| `ENVOY_CACHE_MAX_IDLE_DAYS` | Days a cached bundle may go unused before it is removed (default `30`) |
+| `ENVOY_CACHE_MAX_SIZE` | Size the cache may grow to, such as `500GB`; the least recently used bundles are removed beyond it (default: no limit) |
+| `ENVOY_BUNDLE_CACHE` | Older name for `ENVOY_CACHE_ROOT`; `ENVOY_CACHE_ROOT` takes precedence |
+| `ENVOY_DISABLE_BUNDLE_CACHE` | Older way to turn caching off (`1`/`true`/`yes`); `ENVOY_CACHE` takes precedence |
 | `ENVOY_DISABLE_DISCOVERY_CACHE` | Set to `1`/`true`/`yes` to force a fresh bundle-discovery scan, bypassing the on-disk discovery cache |
 | `ENVOY_VCS` | Force a specific VCS backend for detection: `git`, `perforce`, or `lore` |
 | `ENVOY_PYINIT` | Platform-separated directories whose `*.py` files run once `import envoy` finishes initializing (see [Advanced Topics](../advanced.md#python-api-initialization-hooks-envoy_pyinit)) |

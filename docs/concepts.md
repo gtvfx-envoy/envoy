@@ -188,13 +188,9 @@ See the selected stack with `envoy --diagnose`, or from Python via
 
 ## Bundle Cache
 
-Envoy maintains a local, content-addressed cache for **published/production** bundles (never for your own checkout — a bundle with a `.git` directory is never substituted for a cached copy). The cache location defaults to a platform-appropriate directory and can be overridden via the `bundle_cache_dir` user-config setting or the `ENVOY_BUNDLE_CACHE` environment variable. See `envoy --diagnose` for its current status.
+Envoy copies the **published** bundles a command uses to a local cache the first time it needs them, then runs from that copy, so a slow or unreachable network share stops mattering. Your own checkout (a bundle without a `.bundle` marker) is never cached. Only a command that is about to run copies anything; listing and inspecting read from the share.
 
-On a cache miss for a published bundle, envoy tries to fill it automatically
-from the active team's `prodBundlesRoot`, expected to mirror the
-`<prod_bundles_root>\namespace\name\version\` layout. The fetched bundle is
-stored for subsequent runs. If the source is unavailable or invalid, envoy
-falls back to the originally discovered bundle path.
+The cache lives in `~/.envoy/cache` by default. See [Bundle Caching](caching.md) for how it works, how to configure it, and how it cleans up after itself, or run `envoy --diagnose` to see its current status.
 
 ## VCS Integration
 

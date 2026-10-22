@@ -92,21 +92,33 @@ envoy --set-config verbosity=verbose
 
 The `--verbose` (`-v`) flag always overrides this for the current run.
 
-### `bundle_cache_dir`
+### `cache`
 
-Directory used for the local bundle cache. Set to an empty string to fall
-back to the platform default location (`%LOCALAPPDATA%\envoy\bundle_cache`
-on Windows, `~/.cache/envoy/bundle_cache` elsewhere).
+Whether published bundles are copied to local disk on first use and run from
+there. One of `on` or `off`; caching is on unless this says otherwise.
 
 ```powershell
-envoy --set-config bundle_cache_dir=R:/studio/envoy/bundle_cache
+envoy --set-config cache=off
+```
+
+The `ENVOY_CACHE` environment variable takes precedence over this setting. See
+[Bundle Caching](caching.md).
+
+### `bundle_cache_dir`
+
+Directory holding the bundle cache. Set to an empty string to fall back to the
+default location (`~/.envoy/cache`, which is `%USERPROFILE%\.envoy\cache` on
+Windows).
+
+```powershell
+envoy --set-config bundle_cache_dir=D:/envoy_cache
 envoy --set-config bundle_cache_dir=   # clear it, fall back to the default
 ```
 
-The `ENVOY_BUNDLE_CACHE` environment variable and the `--ignore-config` flag
-both take precedence over this setting — see the
+The `ENVOY_CACHE_ROOT` and `ENVOY_BUNDLE_CACHE` environment variables take
+precedence over this setting, and `--ignore-config` skips it — see the
 [CLI reference](cli-reference/envoy.md#environment-variables) for the full
-precedence order.
+list.
 
 ## Resolution priority
 
