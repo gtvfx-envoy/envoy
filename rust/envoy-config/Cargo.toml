@@ -1,0 +1,18 @@
+[package]
+name = "envoy-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Configuration files for envoy delivery: the redirect that pins an envoy version for each user, with validation, resolution, and snapshots."
+
+[lib]
+name = "envoy_config"
+
+[dependencies]
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

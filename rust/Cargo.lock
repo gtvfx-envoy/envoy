@@ -552,6 +552,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "envoy-config"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "envoy-core"
 version = "0.7.0"
 dependencies = [

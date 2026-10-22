@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 from unittest import mock
 
@@ -117,6 +118,16 @@ def testCheckReleaseCoversEveryWorkspaceCrate(tmp_path):
     )
     with pytest.raises(RuntimeError, match="missing workspace packages"):
         release_automation.checkRelease(missing_root, "0.7.0")
+
+
+def testEveryWorkspaceMemberIsCheckedForTheReleaseVersion():
+    """A crate added to the workspace must also be added to the release check."""
+    manifest = (Path(__file__).parents[1] / "rust" / "Cargo.toml").read_text(encoding="utf-8")
+    members_block = re.search(r"members\s*=\s*\[(.*?)\]", manifest, re.DOTALL)
+    assert members_block is not None
+    members = set(re.findall(r'"([^"]+)"', members_block.group(1)))
+
+    assert members == release_automation.WORKSPACE_PACKAGE_NAMES
 
 
 @pytest.mark.parametrize(
