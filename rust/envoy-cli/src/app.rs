@@ -14,6 +14,7 @@ use envoy_core::environment::{EnvironmentManager, TraceEvent};
 use envoy_core::error::EnvoyError;
 use envoy_core::executor::ProcessExecutor;
 use envoy_core::models::WrapperConfig;
+use envoy_core::python_api;
 use envoy_core::runtime::{
     apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env,
     resolve_team_config_for_bundles,
@@ -1467,7 +1468,7 @@ fn trace_command(
     let allowlist = env_allowlist.map(|values| values.iter().cloned().collect::<HashSet<_>>());
     let env_manager = EnvironmentManager::new(inherit_env, allowlist);
     let mut trace_events = Vec::new();
-    let final_env = match env_manager.prepare_environment(
+    let mut final_env = match env_manager.prepare_environment(
         &env_files,
         None,
         Some(trace_var),
@@ -1479,6 +1480,9 @@ fn trace_command(
             return 1;
         }
     };
+    // A launched command also gets the Python API this envoy ships with, so
+    // the traced value has to include it.
+    let python_api = python_api::apply(&mut final_env);
 
     let final_value = final_env.get(trace_var);
     let separator = "─".repeat(64);
@@ -1572,6 +1576,16 @@ fn trace_command(
         }
     }
     println!();
+
+    if let Some(api) =
+        python_api.filter(|_| matches!(trace_var, "PYTHONPATH" | "ENVOY_PYTHON_PATH"))
+    {
+        println!("{separator}");
+        println!("Added by this envoy:");
+        println!("  its own Python API, {}", api.display());
+        println!("  (ENVOY_PYTHON_API=off leaves PYTHONPATH alone)");
+        println!();
+    }
 
     println!("{separator}");
     if let Some(final_value) = final_value {

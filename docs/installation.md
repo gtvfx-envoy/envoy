@@ -14,9 +14,13 @@ wheel matching the operating system and CPU from the latest
 | macOS Apple silicon | `envoy-v<version>-macos-aarch64.tar.gz` |
 
 Each archive contains `gt/envoy/<version>/bin`. Add that directory to `PATH`.
-The archive also carries the Python API in `py/`, and `.envoy/python_env.json`
-adds it to `PYTHONPATH` for commands that use the bundle, so `import envoy`
-works there without installing the wheel.
+The archive also carries the Python API in `py/`. The `envoy` in that
+directory adds `py/` to the end of `PYTHONPATH` for every command it launches,
+and sets `ENVOY_PYTHON_PATH` to it, so `import envoy` works without installing
+the wheel and without an envoy bundle in the stack. A copy of the API that the
+stack provides comes first and wins. Set `ENVOY_PYTHON_API=off` to leave
+`PYTHONPATH` alone. A build that is not laid out as a release, such as a
+developer build, adds nothing.
 
 === "Windows PowerShell"
 

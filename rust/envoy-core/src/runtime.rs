@@ -640,13 +640,15 @@ pub fn prepare_env(
     let allowlist = allowlist.map(|items| items.iter().cloned().collect::<HashSet<_>>());
     let env_manager = EnvironmentManager::new(inherit_env, allowlist);
 
-    let env = env_manager
+    let mut env = env_manager
         .prepare_environment(&env_files, None, None, None)
         .map_err(|error| {
             EnvoyError::EnvironmentBuild(format!(
                 "Failed to prepare environment for '{env_source}': {error}"
             ))
         })?;
+    // The last word on PYTHONPATH, so anything the stack provides comes first.
+    crate::python_api::apply(&mut env);
 
     Ok((env, command))
 }

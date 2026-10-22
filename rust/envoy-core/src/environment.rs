@@ -84,13 +84,21 @@ static ENVOY_ENV_VARS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
         "DESPATCH_CONFIG_ROOT",
         "ENVOY_ALLOWLIST",
+        "ENVOY_BIN_FLOAT",
+        "ENVOY_BIN_LOCK",
         "ENVOY_BNDL_PROD",
         "ENVOY_BNDL_ROOTS",
         "ENVOY_CONFIG_ROOT",
         "ENVOY_CONFIG_PROD",
+        "ENVOY_PYTHON_API",
+        "ENVOY_REDIRECT_CONFIG",
+        "ENVOY_SHIM_TIMEOUT_MS",
         "ENVOY_STACK",
         "ENVOY_STACK_CONTEXT",
         "ENVOY_STACK_ROOTS",
+        "ENVOY_TEAM",
+        "ENVOY_USER",
+        "ENVOY_VERSION",
         "ENVOY_BUNDLE_CACHE",
         "ENVOY_CACHE",
         "ENVOY_CACHE_MAX_IDLE_DAYS",
@@ -1630,6 +1638,40 @@ mod tests {
                     result.get("ENVOY_BNDL_ROOTS").map(String::as_str),
                     Some("R:/bundles")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn a_nested_envoy_inherits_how_the_launcher_chose_it() {
+        with_locked_env(
+            &[
+                ("ENVOY_BIN_LOCK", Some(OsStr::new("C:/app/bin/envoy.exe"))),
+                (
+                    "ENVOY_BIN_FLOAT",
+                    Some(OsStr::new("C:/home/.envoy/bin/envoy.exe")),
+                ),
+                ("ENVOY_VERSION", Some(OsStr::new("v0.8.0"))),
+                ("ENVOY_USER", Some(OsStr::new("someone"))),
+                ("ENVOY_PYTHON_API", Some(OsStr::new("off"))),
+                // Each envoy sets this for the commands it launches.
+                ("ENVOY_PYTHON_PATH", Some(OsStr::new("C:/other/py"))),
+            ],
+            || {
+                let result = EnvironmentManager::new(false, None)
+                    .prepare_environment(&[], None, None, None)
+                    .expect("environment should prepare");
+
+                for name in [
+                    "ENVOY_BIN_LOCK",
+                    "ENVOY_BIN_FLOAT",
+                    "ENVOY_VERSION",
+                    "ENVOY_USER",
+                    "ENVOY_PYTHON_API",
+                ] {
+                    assert!(result.contains_key(name), "{name} should be inherited");
+                }
+                assert!(!result.contains_key("ENVOY_PYTHON_PATH"));
             },
         );
     }

@@ -102,7 +102,8 @@ Show how a variable is set, modified, and resolved as each env file is loaded:
 en --trace PYTHONPATH python
 ```
 
-Useful for debugging unexpected variable values.
+Useful for debugging unexpected variable values. When the value includes the
+Python API that a release of envoy adds on its own, the trace says so.
 
 ### `--verbose`
 
@@ -362,6 +363,8 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_DISABLE_DISCOVERY_CACHE` | Set to `1`/`true`/`yes` to force a fresh bundle-discovery scan, bypassing the on-disk discovery cache |
 | `ENVOY_VCS` | Force a specific VCS backend for detection: `git`, `perforce`, or `lore` |
 | `ENVOY_PYINIT` | Platform-separated directories whose `*.py` files run once `import envoy` finishes initializing (see [Advanced Topics](../advanced.md#python-api-initialization-hooks-envoy_pyinit)) |
+| `ENVOY_PYTHON_API` | `off`, `false`, `no`, or `0` stops a release of envoy adding its own Python API (`py/`) to the end of `PYTHONPATH` for the commands it launches (see [Installation](../installation.md)) |
+| `ENVOY_PYTHON_PATH` | Set by a release of envoy for the commands it launches: the directory of the Python API that ships with it |
 
 ## User Config Flags
 
