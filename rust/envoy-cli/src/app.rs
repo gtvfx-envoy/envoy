@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use envoy_core::bundle_cache::{open_default_bundle_cache, resolve_bundle_cache_dir};
+use envoy_core::bundle_store::{cache_for_command, format_bytes, summarize, CacheSettings};
 use envoy_core::commands::{find_commands_file, CommandDefinition, CommandRegistry};
 use envoy_core::discovery::{get_bundles, BundleInfo};
 use envoy_core::environment::{EnvironmentManager, TraceEvent};
@@ -12,7 +12,7 @@ use envoy_core::error::EnvoyError;
 use envoy_core::executor::ProcessExecutor;
 use envoy_core::models::WrapperConfig;
 use envoy_core::runtime::{
-    apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env, resolve_cached_bundles,
+    apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env,
     resolve_team_config_for_bundles,
 };
 use envoy_core::stack::{Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_SETTING};
@@ -417,6 +417,16 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
             .emit_and_return(0);
     };
 
+    // Everything above only read bundle metadata. A command that is about to
+    // run needs its bundles on local disk, so cache the ones it uses now.
+    let (registry, bundles) = cache_for_command(
+        registry,
+        bundles,
+        command_name,
+        cli.env.as_deref(),
+        &CacheSettings::resolve(!cli.ignore_config),
+    );
+
     let options = ExecutionOptions {
         bundles: bundles.as_deref(),
         verbose,
@@ -466,24 +476,15 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
         }
     };
 
-    // Resolve the local bundle cache once up front so both stack-backed and
-    // root-based discovery apply it consistently. `--ignore-config` skips the
-    // user-config-sourced cache directory while still allowing
-    // the `ENVOY_BUNDLE_CACHE` / `ENVOY_DISABLE_BUNDLE_CACHE` env vars.
-    let mut bundle_cache = open_default_bundle_cache(!cli.ignore_config);
-
+    // Bundles load from their source paths here. Copying a bundle to local
+    // disk waits until a command is about to run (see `cache_for_command`),
+    // so listing and inspecting never copy anything.
     if let Some(stack) = selected_stack.as_ref() {
         match stack.bundle_infos() {
             Ok(discovered_bundles) => {
                 if discovered_bundles.is_empty() {
                     debug(verbose, "No bundles found in stack");
                 } else {
-                    let team_config = resolve_team_config_for_bundles(Some(&discovered_bundles));
-                    let discovered_bundles = resolve_cached_bundles(
-                        discovered_bundles,
-                        bundle_cache.as_mut(),
-                        team_config.as_ref(),
-                    );
                     let discovered_bundles =
                         apply_overrides_or_bail(discovered_bundles, &bundle_overrides)?;
                     debug(
@@ -523,12 +524,6 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
     } else {
         match get_bundles(None) {
             Ok(discovered_bundles) if !discovered_bundles.is_empty() => {
-                let team_config = resolve_team_config_for_bundles(Some(&discovered_bundles));
-                let discovered_bundles = resolve_cached_bundles(
-                    discovered_bundles,
-                    bundle_cache.as_mut(),
-                    team_config.as_ref(),
-                );
                 let discovered_bundles =
                     apply_overrides_or_bail(discovered_bundles, &bundle_overrides)?;
                 debug(
@@ -761,17 +756,23 @@ fn run_diagnose(
     }
     println!();
 
-    match resolve_bundle_cache_dir(true) {
-        Some(dir) => {
-            let reachable = open_default_bundle_cache(true).is_some();
-            let note = if reachable {
-                "reachable"
-            } else {
-                "configured but could not be opened"
-            };
-            println!("Bundle cache: {} ({note})", dir.display());
+    let cache = CacheSettings::resolve(true);
+    if cache.enabled {
+        println!(
+            "Bundle cache: {} (on, set by {})",
+            cache.root.display(),
+            cache.enabled_by
+        );
+        match summarize(&cache) {
+            Some(summary) => println!(
+                "  {} entries, {}",
+                summary.entries,
+                format_bytes(summary.bytes)
+            ),
+            None => println!("  nothing cached yet"),
         }
-        None => println!("Bundle cache: disabled (ENVOY_DISABLE_BUNDLE_CACHE is set)"),
+    } else {
+        println!("Bundle cache: off (set by {})", cache.enabled_by);
     }
     println!();
 

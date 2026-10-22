@@ -35,8 +35,9 @@ pub struct KnownSetting {
 }
 
 const VERBOSITY_CHOICES: &[&str] = &["quiet", "normal", "verbose"];
+const CACHE_CHOICES: &[&str] = &["on", "off"];
 
-const KNOWN_SETTINGS: [(&str, KnownSetting); 4] = [
+const KNOWN_SETTINGS: [(&str, KnownSetting); 5] = [
     (
         "stack",
         KnownSetting {
@@ -64,10 +65,18 @@ decryption disabled unless ENVOY_CONFIG_KEY_FILE is set.",
     (
         "bundle_cache_dir",
         KnownSetting {
-            description: "Directory used for the local bundle cache. Set to an empty \
-string to fall back to the platform default location. See also the ENVOY_BUNDLE_CACHE \
-and ENVOY_DISABLE_BUNDLE_CACHE environment variables.",
+            description: "Directory holding the local bundle cache. Set to an empty \
+string to fall back to the default location (~/.envoy/cache). The ENVOY_CACHE_ROOT \
+and ENVOY_BUNDLE_CACHE environment variables take precedence.",
             choices: None,
+        },
+    ),
+    (
+        "cache",
+        KnownSetting {
+            description: "Whether published bundles are copied to local disk on first \
+use and run from there. The ENVOY_CACHE environment variable takes precedence.",
+            choices: Some(CACHE_CHOICES),
         },
     ),
 ];
@@ -483,7 +492,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "validation error: Unknown config setting \"unknown_setting\". Known settings: \
-stack, config_key_file, verbosity, bundle_cache_dir"
+stack, config_key_file, verbosity, bundle_cache_dir, cache"
         );
     }
 

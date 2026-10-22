@@ -558,6 +558,7 @@ dependencies = [
  "age",
  "base64 0.22.1",
  "ctrlc",
+ "envoy-store",
  "fs4",
  "hex",
  "json_comments",

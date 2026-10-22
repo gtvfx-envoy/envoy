@@ -13,6 +13,7 @@ name = "envoy_core"
 age = "0.10"
 base64 = "0.22"
 ctrlc = "3"
+envoy-store = { path = "../envoy-store" }
 fs4 = { version = "1", features = ["sync"] }
 hex = "0.4"
 json_comments = "0.2"
