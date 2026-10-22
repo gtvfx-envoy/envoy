@@ -185,6 +185,12 @@ def buildFixture(destination: Path, large_mb: int, small_files: int, deep_levels
     writeManySmallFiles(writeBundle(bundles, "ext:swarm", "3.11.9"), small_files)
     writeDeepPaths(writeBundle(bundles, "ext:deep", "2.0.0"), deep_levels)
 
+    # Every bundle adds a global environment file, so each one is needed by any command.
+    for global_env in bundles.glob("*/*/*/.envoy"):
+        (global_env / "global_env.json").write_text(
+            json.dumps({"+=MINI_STUDIO_BUNDLES": "${__BUNDLE__}"}, indent=2), encoding="utf-8"
+        )
+
     entries = "".join(
         f"  - path: '{path}'\n" for path in sorted(bundles.glob("*/*/*")) if path.is_dir()
     )
