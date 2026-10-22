@@ -218,7 +218,14 @@ def timeRun(command: list[str], environment: dict[str, str]) -> tuple[float, int
 
     """
     started = time.perf_counter()
-    result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        command,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
     elapsed = (time.perf_counter() - started) * 1000
     return elapsed, result.returncode, result.stderr
 
@@ -250,7 +257,11 @@ def runBenchmark(options: argparse.Namespace) -> dict:
             environment[variable] = str(cache_root)
 
         version = subprocess.run(
-            [options.envoy, "--version"], capture_output=True, text=True, check=False
+            [options.envoy, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
         ).stdout.strip()
 
         timings: list[float] = []
