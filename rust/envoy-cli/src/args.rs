@@ -1,6 +1,7 @@
 use clap::{ArgAction, CommandFactory, Parser};
 
-const LEGACY_ALIAS_HELP: &str = "Legacy compatibility aliases: -cf, -sc, -gc, -lc, -ic";
+const AFTER_HELP: &str = "Cache management: envoy cache status|list|verify|prune|warm|clear\n\
+Legacy compatibility aliases: -cf, -sc, -gc, -lc, -ic";
 
 /// Maximum length, in Unicode scalar values (not bytes), for a `--tag`
 /// value before [`crate::app`] deterministically truncates it.
@@ -18,7 +19,7 @@ pub(crate) const MAX_TAG_LENGTH: usize = 200;
     name = "envoy",
     about = "Envoy: Cross-platform environment orchestration for applications",
     version = env!("ENVOY_VERSION"),
-    after_help = LEGACY_ALIAS_HELP
+    after_help = AFTER_HELP
 )]
 pub(crate) struct Cli {
     #[arg(
@@ -158,6 +159,34 @@ resolved environment for inspection, instead of running COMMAND itself."
 
     #[arg(long, short = 'v', help = "Enable verbose logging")]
     pub verbose: bool,
+
+    #[arg(
+        long,
+        help = "Do everything a run does short of launching it: resolve the stack and \
+copy the bundles COMMAND needs (every published bundle when no COMMAND is given) into \
+the bundle cache, then exit. Run it ahead of time to warm a machine."
+    )]
+    pub noop: bool,
+
+    #[arg(
+        long = "cache",
+        value_name = "on|off",
+        help = "Turn bundle caching on or off for this invocation."
+    )]
+    pub cache: Option<String>,
+
+    #[arg(
+        long = "cache-root",
+        value_name = "PATH",
+        help = "Use PATH as the bundle cache directory for this invocation."
+    )]
+    pub cache_root: Option<String>,
+
+    #[arg(
+        long = "no-prune",
+        help = "Do not prune the bundle cache in the background during this invocation."
+    )]
+    pub no_prune: bool,
 
     #[arg(
         long = "inherit-env",
@@ -329,7 +358,9 @@ fn legacy_alias(token: &str) -> Option<(&'static str, Option<ValueExpectation>, 
 fn option_value_expectation(token: &str) -> Option<ValueExpectation> {
     match token {
         "--info" | "--which" | "--commands-file" | "--stack" | "-s" | "--set-config" | "--env"
-        | "-e" | "--trace" | "--override-bundle" | "-o" => Some(ValueExpectation::Required),
+        | "-e" | "--trace" | "--override-bundle" | "-o" | "--cache" | "--cache-root" => {
+            Some(ValueExpectation::Required)
+        }
         "--get-config" | "--diagnose" | "--docs" => Some(ValueExpectation::Optional),
         _ => None,
     }

@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-use envoy_store::{EntryKey, Lease, Observer, Outcome, PrunePolicy, Store, StoreError};
+pub use envoy_store::{EntryInfo, Health, PrunePolicy, PruneReport, Store, Verdict};
+use envoy_store::{EntryKey, Lease, Observer, Outcome, StoreError};
 
 use crate::commands::CommandRegistry;
 use crate::discovery::{is_published_bundle, Bundle, BundleInfo, BUNDLE_CHECKOUT};
@@ -47,6 +48,9 @@ pub const DEFAULT_MAX_IDLE_DAYS: u64 = 30;
 /// Prune runs on an ordinary command at most this often.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// File in the store root whose modified time records the last background prune.
+const LAST_PRUNE_FILE: &str = "last-prune";
+
 /// How often a non-interactive run reports progress.
 const LINE_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -63,6 +67,8 @@ pub struct CacheSettings {
     pub max_idle: Duration,
     /// Size above which the least recently used entries are pruned.
     pub max_bytes: Option<u64>,
+    /// Whether an ordinary run may prune in the background.
+    pub prune: bool,
 }
 
 impl CacheSettings {
@@ -128,6 +134,7 @@ impl CacheSettings {
             max_bytes: non_empty(CACHE_MAX_SIZE_VAR)
                 .as_deref()
                 .and_then(parse_size),
+            prune: true,
         }
     }
 
@@ -139,6 +146,22 @@ impl CacheSettings {
             self.enabled = enabled;
             self.enabled_by = requested_by;
         }
+        self
+    }
+
+    /// The same settings with the store in `root`, when one is given.
+    #[must_use]
+    pub fn with_root(mut self, root: Option<PathBuf>) -> Self {
+        if let Some(root) = root {
+            self.root = root;
+        }
+        self
+    }
+
+    /// The same settings with background pruning allowed or not.
+    #[must_use]
+    pub fn with_prune(mut self, prune: bool) -> Self {
+        self.prune = prune;
         self
     }
 
@@ -379,21 +402,54 @@ fn cache_published(
         .collect()
 }
 
+const NO_MARKER: &str = "it has no .bundle marker (a checkout or an unpublished bundle)";
+const NO_VERSION: &str = "its .bundle marker states no version";
+
 fn cache_one(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> BundleInfo {
+    offer(bundle, store, observer).bundle
+}
+
+/// What happened when a bundle was offered to the store.
+struct Offered {
+    /// The bundle to run: its cached copy, or the original when it stayed.
+    bundle: BundleInfo,
+    /// `namespace:name@version`, or `namespace:name` when there is no version.
+    label: String,
+    result: Result<Outcome, Stay>,
+}
+
+/// Why a bundle stayed where it is.
+enum Stay {
+    /// It is never cached, for this reason.
+    NotCacheable(String),
+    /// The store could not take it. The reason was already reported.
+    Failed(String),
+}
+
+fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered {
     let bndlid = bundle.bndlid();
 
     let version = Bundle::from_info(bundle.clone()).version();
     if version == BUNDLE_CHECKOUT {
-        tracing::debug!(bundle_id = %bndlid, "Not cached: its .bundle marker states no version");
-        return bundle;
+        tracing::debug!(bundle_id = %bndlid, "Not cached: {NO_VERSION}");
+        return Offered {
+            bundle,
+            label: bndlid,
+            result: Err(Stay::NotCacheable(NO_VERSION.to_string())),
+        };
     }
     let key = match EntryKey::new(&bundle.namespace, &bundle.name, &version) {
         Ok(key) => key,
         Err(error) => {
             tracing::debug!(bundle_id = %bndlid, "Not cached: {error}");
-            return bundle;
+            return Offered {
+                bundle,
+                label: bndlid,
+                result: Err(Stay::NotCacheable(error.to_string())),
+            };
         }
     };
+    let label = key.to_string();
 
     match store.ensure(&key, &bundle.root, observer) {
         Ok(ensured) => {
@@ -405,7 +461,15 @@ fn cache_one(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Bund
                 );
             }
             hold(ensured.lease);
-            BundleInfo::new(ensured.path, bundle.name.clone(), bundle.namespace.clone())
+            Offered {
+                bundle: BundleInfo::new(
+                    ensured.path,
+                    bundle.name.clone(),
+                    bundle.namespace.clone(),
+                ),
+                label,
+                result: Ok(ensured.outcome),
+            }
         }
         Err(error) => {
             match error {
@@ -429,8 +493,97 @@ fn cache_one(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Bund
                     bundle.root.display()
                 ),
             }
-            bundle
+            Offered {
+                bundle,
+                label,
+                result: Err(Stay::Failed(error.to_string())),
+            }
         }
+    }
+}
+
+/// What [`warm`] did.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WarmReport {
+    /// Bundles copied in just now, as `namespace:name@version`.
+    pub filled: Vec<String>,
+    /// Bytes copied in just now.
+    pub filled_bytes: u64,
+    /// Bundles that were already in the store.
+    pub already_cached: usize,
+    /// Bundles the store could not take, with why. They still run from where
+    /// they are.
+    pub failed: Vec<(String, String)>,
+    /// Bundles that are never cached, such as checkouts, with why.
+    pub not_cacheable: Vec<(String, String)>,
+}
+
+/// Copy every published bundle in `bundles` into the store ahead of time.
+///
+/// This is what `envoy --noop` and `envoy cache warm` do, so a first real run
+/// finds everything already local.
+pub fn warm(bundles: &[BundleInfo], store: &Store, observer: &dyn Observer) -> WarmReport {
+    let mut report = WarmReport::default();
+
+    for bundle in bundles {
+        if !is_published_bundle(&bundle.root) {
+            report
+                .not_cacheable
+                .push((bundle.bndlid(), NO_MARKER.to_string()));
+            continue;
+        }
+        let offered = offer(bundle.clone(), store, observer);
+        match offered.result {
+            Ok(Outcome::Hit) => report.already_cached += 1,
+            Ok(Outcome::Filled { bytes, .. }) => {
+                report.filled.push(offered.label);
+                report.filled_bytes += bytes;
+            }
+            Err(Stay::NotCacheable(reason)) => report.not_cacheable.push((offered.label, reason)),
+            Err(Stay::Failed(reason)) => report.failed.push((offered.label, reason)),
+        }
+    }
+
+    report
+}
+
+/// How a bundle stands with the store, for `--diagnose` and `envoy cache`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Standing {
+    /// A usable copy is in the store.
+    Cached,
+    /// It can be cached and has not been yet.
+    NotCachedYet,
+    /// The store refused it earlier and would again, for this reason.
+    Refused(String),
+    /// It is never cached, for this reason.
+    NotCacheable(String),
+}
+
+/// Work out how `bundle` stands with `store`, without copying or creating
+/// anything. Pass `None` when the store does not exist yet.
+pub fn standing(bundle: &BundleInfo, store: Option<&Store>) -> Standing {
+    if !is_published_bundle(&bundle.root) {
+        return Standing::NotCacheable(NO_MARKER.to_string());
+    }
+    let version = Bundle::from_info(bundle.clone()).version();
+    if version == BUNDLE_CHECKOUT {
+        return Standing::NotCacheable(NO_VERSION.to_string());
+    }
+    let key = match EntryKey::new(&bundle.namespace, &bundle.name, &version) {
+        Ok(key) => key,
+        Err(error) => return Standing::NotCacheable(error.to_string()),
+    };
+
+    let Some(store) = store else {
+        return Standing::NotCachedYet;
+    };
+    if store.lookup(&key).is_some() {
+        Standing::Cached
+    } else if let Some(error) = store.refusal(&key) {
+        Standing::Refused(error.to_string())
+    } else {
+        Standing::NotCachedYet
     }
 }
 
@@ -492,18 +645,32 @@ pub struct StoreSummary {
     pub unusable: usize,
     /// Total size recorded for the usable entries, in bytes.
     pub bytes: u64,
+    /// Bundles the store has found it cannot hold, such as ones whose paths
+    /// are too long for the root.
+    pub refused: usize,
+}
+
+/// Open the store the settings describe if it exists, without creating it.
+pub fn existing_store(settings: &CacheSettings) -> Option<Store> {
+    Store::open_existing(&settings.root).ok().flatten()
+}
+
+/// When the store was last pruned in the background, if it ever was.
+pub fn last_prune(settings: &CacheSettings) -> Option<SystemTime> {
+    std::fs::metadata(settings.root.join(LAST_PRUNE_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 /// Summarize the store, or `None` when it has not been created yet.
 ///
 /// Never creates the store, so looking is free of side effects.
 pub fn summarize(settings: &CacheSettings) -> Option<StoreSummary> {
-    if !settings.root.join("store.json").is_file() {
-        return None;
-    }
-
-    let store = Store::open(&settings.root).ok()?;
-    let mut summary = StoreSummary::default();
+    let store = existing_store(settings)?;
+    let mut summary = StoreSummary {
+        refused: store.refusals().len(),
+        ..StoreSummary::default()
+    };
     for entry in store.list() {
         if entry.usable() {
             summary.entries += 1;
@@ -515,13 +682,36 @@ pub fn summarize(settings: &CacheSettings) -> Option<StoreSummary> {
     Some(summary)
 }
 
+/// Copy the bundles `command_name` needs into the store ahead of time, as
+/// `envoy --noop COMMAND` does.
+pub fn warm_command(
+    registry: &CommandRegistry,
+    bundles: &[BundleInfo],
+    command_name: &str,
+    env_override: Option<&str>,
+    store: &Store,
+    observer: &dyn Observer,
+) -> WarmReport {
+    let needed = contributing_roots(registry, command_name, env_override, bundles);
+    let wanted: Vec<BundleInfo> = bundles
+        .iter()
+        .filter(|bundle| needed.contains(&bundle.root))
+        .cloned()
+        .collect();
+    warm(&wanted, store, observer)
+}
+
 /// Prune the store without holding up the command, at most once a day.
 ///
 /// It runs on a thread that is simply abandoned if the process ends first:
 /// entries are removed by renaming them aside, so being cut short loses
 /// nothing, and the next prune finishes the cleanup.
 fn prune_in_background(store: Store, settings: &CacheSettings) {
-    let stamp = settings.root.join("last-prune");
+    if !settings.prune {
+        return;
+    }
+
+    let stamp = settings.root.join(LAST_PRUNE_FILE);
     let recent = std::fs::metadata(&stamp)
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -832,5 +1022,95 @@ mod tests {
 
         assert_eq!(cached, vec![info]);
         assert!(store.list().is_empty());
+    }
+
+    #[test]
+    fn warm_copies_every_published_bundle_and_explains_the_rest() {
+        let temp = tempdir().expect("tempdir is created");
+        let mut bundles = studio(temp.path());
+        let checkout = temp.path().join("gt").join("dev");
+        fs::create_dir_all(checkout.join(".envoy")).expect("checkout is created");
+        bundles.push(BundleInfo::new(
+            checkout,
+            "dev".to_string(),
+            "gt".to_string(),
+        ));
+        let store = Store::open(temp.path().join("store")).expect("store opens");
+
+        let first = warm(&bundles, &store, &envoy_store::Quiet);
+
+        assert_eq!(first.filled.len(), 4);
+        assert!(first.filled.contains(&"gt:tool@1.0.0".to_string()));
+        assert_eq!(first.already_cached, 0);
+        assert!(first.failed.is_empty());
+        assert_eq!(first.not_cacheable.len(), 1);
+        assert_eq!(first.not_cacheable[0].0, "gt:dev");
+        assert!(first.not_cacheable[0].1.contains(".bundle marker"));
+
+        let second = warm(&bundles, &store, &envoy_store::Quiet);
+        assert!(second.filled.is_empty(), "everything is already local");
+        assert_eq!(second.already_cached, 4);
+    }
+
+    #[test]
+    fn warming_a_command_copies_only_what_it_needs() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let mut registry = CommandRegistry::empty();
+        registry.load_from_bundles(&bundles);
+        let store = Store::open(temp.path().join("store")).expect("store opens");
+
+        let report = warm_command(
+            &registry,
+            &bundles,
+            "run",
+            None,
+            &store,
+            &envoy_store::Quiet,
+        );
+
+        assert_eq!(report.filled.len(), 3, "tool, globals and lib, not other");
+        assert!(!report.filled.contains(&"ext:other@3.0.0".to_string()));
+    }
+
+    #[test]
+    fn standing_tells_each_kind_of_bundle_apart_without_creating_a_store() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let root = temp.path().join("store");
+
+        assert_eq!(standing(&bundles[0], None), Standing::NotCachedYet);
+        let store = Store::open(&root).expect("store opens");
+        assert_eq!(standing(&bundles[0], Some(&store)), Standing::NotCachedYet);
+        warm(&bundles[..1], &store, &envoy_store::Quiet);
+        assert_eq!(standing(&bundles[0], Some(&store)), Standing::Cached);
+
+        let checkout = temp.path().join("gt").join("dev");
+        fs::create_dir_all(checkout.join(".envoy")).expect("checkout is created");
+        let checkout = BundleInfo::new(checkout, "dev".to_string(), "gt".to_string());
+        assert!(matches!(
+            standing(&checkout, Some(&store)),
+            Standing::NotCacheable(reason) if reason.contains("no .bundle marker")
+        ));
+    }
+
+    #[test]
+    fn a_flag_can_override_where_and_whether_to_cache_and_prune() {
+        let base = settings(&[]);
+
+        let changed = base
+            .clone()
+            .with_enabled(Some(false), "--cache")
+            .with_root(Some(PathBuf::from("/elsewhere")))
+            .with_prune(false);
+
+        assert!(!changed.enabled);
+        assert_eq!(changed.enabled_by, "--cache");
+        assert_eq!(changed.root, PathBuf::from("/elsewhere"));
+        assert!(!changed.prune);
+
+        let untouched = base.clone().with_enabled(None, "--cache").with_root(None);
+        assert_eq!(untouched, base, "no flag means no change");
+        assert!(base.prune, "pruning is on unless told otherwise");
     }
 }

@@ -1,5 +1,6 @@
 mod app;
 mod args;
+mod cache_cmd;
 
 pub fn run(argv: &[String]) -> i32 {
     app::run(argv)

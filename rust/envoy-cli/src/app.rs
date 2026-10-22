@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use envoy_core::bundle_store::{cache_for_command, format_bytes, summarize, CacheSettings};
+use envoy_core::bundle_store::{
+    cache_for_command, existing_store, format_bytes, parse_switch, standing, summarize,
+    CacheSettings, Standing,
+};
 use envoy_core::commands::{find_commands_file, CommandDefinition, CommandRegistry};
 use envoy_core::discovery::{get_bundles, BundleInfo};
 use envoy_core::environment::{EnvironmentManager, TraceEvent};
@@ -24,6 +27,7 @@ use envoy_core::user_config::{known_settings, UserConfig};
 use envoy_core::wrapper::ApplicationWrapper;
 
 use crate::args::{self, Cli};
+use crate::cache_cmd;
 
 const DOCS_URL: &str = "https://gtvfx-envoy.github.io/envoy/";
 
@@ -282,6 +286,25 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
         return emission(CommandKind::GetStack).emit_and_return(exit_code);
     }
 
+    let cache = match cache_settings(&cli) {
+        Ok(settings) => settings,
+        Err(message) => {
+            eprintln!("Error: {message}");
+            return emission(CommandKind::ResolutionFailure)
+                .with_error_category(ErrorCategory::Validation)
+                .emit_and_return(1);
+        }
+    };
+
+    // Everything but `warm` works on the cache directory alone, so it needs no
+    // stack and is handled before any bundle is loaded.
+    if let Some(action) = cache_cmd::action(cli.command.as_deref(), &cli.args) {
+        if action != "warm" {
+            let exit_code = cache_cmd::run_action(action, &cli.args[1..], &cache);
+            return emission(CommandKind::Cache).emit_and_return(exit_code);
+        }
+    }
+
     let user_cfg = UserConfig::load(None);
     let verbose =
         cli.verbose || (!cli.ignore_config && matches!(user_cfg.get("verbosity"), Some("verbose")));
@@ -351,6 +374,7 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
             filtered_command_name,
             cli.inherit_env,
             env_allowlist.as_deref(),
+            &cache,
         );
         let mut result = emission(CommandKind::Diagnose)
             .with_stack(stack.as_ref())
@@ -403,6 +427,28 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
             .emit_and_return(exit_code);
     }
 
+    // `envoy --noop [COMMAND]` and `envoy cache warm [COMMAND]` stop short of
+    // launching anything: they only copy bundles into the cache.
+    let warm_action = cache_cmd::action(cli.command.as_deref(), &cli.args) == Some("warm");
+    if cli.noop || warm_action {
+        let target = if warm_action {
+            cli.args.get(1).map(String::as_str)
+        } else {
+            cli.command.as_deref()
+        };
+        let exit_code = cache_cmd::warm_cache(
+            &registry,
+            bundles.as_deref(),
+            target,
+            cli.env.as_deref(),
+            &cache,
+        );
+        return emission(CommandKind::Noop)
+            .with_stack(stack.as_ref())
+            .with_bundles(bundles.as_deref())
+            .emit_and_return(exit_code);
+    }
+
     let Some(command_name) = cli.command.as_deref() else {
         if let Err(error) = args::print_help() {
             eprintln!("Error: {error}");
@@ -419,13 +465,8 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
 
     // Everything above only read bundle metadata. A command that is about to
     // run needs its bundles on local disk, so cache the ones it uses now.
-    let (registry, bundles) = cache_for_command(
-        registry,
-        bundles,
-        command_name,
-        cli.env.as_deref(),
-        &CacheSettings::resolve(!cli.ignore_config),
-    );
+    let (registry, bundles) =
+        cache_for_command(registry, bundles, command_name, cli.env.as_deref(), &cache);
 
     let options = ExecutionOptions {
         bundles: bundles.as_deref(),
@@ -445,6 +486,23 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
     }
 
     run_command(&registry, command_name, &cli.args, options)
+}
+
+/// The caching settings for this run: the environment and user config, then
+/// any `--cache`, `--cache-root` and `--no-prune` flags.
+fn cache_settings(cli: &Cli) -> Result<CacheSettings, String> {
+    let enabled = match cli.cache.as_deref() {
+        None => None,
+        Some(value) => Some(
+            parse_switch(value)
+                .ok_or_else(|| format!("--cache takes 'on' or 'off', not '{value}'"))?,
+        ),
+    };
+
+    Ok(CacheSettings::resolve(!cli.ignore_config)
+        .with_enabled(enabled, "--cache")
+        .with_root(cli.cache_root.as_deref().map(PathBuf::from))
+        .with_prune(!cli.no_prune))
 }
 
 fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32> {
@@ -677,6 +735,16 @@ fn raw_path_without_env_override(command: Option<&str>, env_override: Option<&st
     command.is_some_and(is_raw_path) && env_override.is_none()
 }
 
+/// The note `--diagnose` shows after a bundle: how it stands with the cache.
+fn standing_note(standing: &Standing) -> String {
+    match standing {
+        Standing::Cached => "  [cached]".to_string(),
+        Standing::NotCachedYet => "  [not cached yet]".to_string(),
+        Standing::Refused(reason) => format!("  [refused: {reason}]"),
+        Standing::NotCacheable(reason) => format!("  [never cached: {reason}]"),
+    }
+}
+
 /// Implements `envoy --diagnose [COMMAND]`.
 ///
 /// Surfaces the current stack, discovered bundles/commands, resolved team,
@@ -698,6 +766,7 @@ fn run_diagnose(
     command_name: Option<&str>,
     inherit_env: bool,
     env_allowlist: Option<&[String]>,
+    cache: &CacheSettings,
 ) -> i32 {
     let separator = "=".repeat(64);
     println!("{separator}");
@@ -723,11 +792,22 @@ fn run_diagnose(
     }
     println!();
 
+    // Looking at the cache must not create it, so the store is only opened if it exists.
+    let store = cache.enabled.then(|| existing_store(cache)).flatten();
     match bundles {
         Some(bundles) if !bundles.is_empty() => {
             println!("Bundles discovered: {}", bundles.len());
             for bundle in bundles {
-                println!("  - {:<24} {}", bundle.bndlid(), bundle.root.display());
+                let note = if cache.enabled {
+                    standing_note(&standing(bundle, store.as_ref()))
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  - {:<24} {}{note}",
+                    bundle.bndlid(),
+                    bundle.root.display()
+                );
             }
         }
         _ => println!("Bundles discovered: 0 (legacy single-.envoy-directory mode, or none found)"),
@@ -756,19 +836,26 @@ fn run_diagnose(
     }
     println!();
 
-    let cache = CacheSettings::resolve(true);
     if cache.enabled {
         println!(
             "Bundle cache: {} (on, set by {})",
             cache.root.display(),
             cache.enabled_by
         );
-        match summarize(&cache) {
-            Some(summary) => println!(
-                "  {} entries, {}",
-                summary.entries,
-                format_bytes(summary.bytes)
-            ),
+        match summarize(cache) {
+            Some(summary) => {
+                println!(
+                    "  {} entries, {}",
+                    summary.entries,
+                    format_bytes(summary.bytes)
+                );
+                if summary.refused > 0 {
+                    println!(
+                        "  {} bundle(s) do not fit in this directory (marked 'refused' above)",
+                        summary.refused
+                    );
+                }
+            }
             None => println!("  nothing cached yet"),
         }
     } else {

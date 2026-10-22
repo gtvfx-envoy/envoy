@@ -659,6 +659,243 @@ fn an_unusable_cache_falls_back_to_the_share_with_one_warning() {
     );
 }
 
+/// `envoy` with caching on and the cache in `root`.
+fn caching_command(root: &Path) -> Command {
+    let mut command = base_command();
+    command
+        .env("ENVOY_CACHE", "on")
+        .env("ENVOY_CACHE_ROOT", root);
+    command
+}
+
+#[test]
+fn cache_actions_report_and_clean_up_without_a_stack() {
+    let scratch = ScratchDir::new("envoy_cache_actions");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let status = caching_command(&cache_root)
+        .args(["cache", "status"])
+        .assert()
+        .success();
+    let stdout = stdout_text(&status);
+    assert!(stdout.contains(&cache_root.display().to_string()));
+    assert!(stdout.contains("none (the cache has not been created yet)"));
+    assert!(!cache_root.exists(), "status must not create the cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    let status = caching_command(&cache_root)
+        .args(["cache", "status"])
+        .assert()
+        .success();
+    assert!(stdout_text(&status).contains("Entries: 1 ("));
+
+    let list = caching_command(&cache_root)
+        .args(["cache", "list"])
+        .assert()
+        .success();
+    assert!(stdout_text(&list).contains("gt:tool@1.0.0"));
+
+    let verify = caching_command(&cache_root)
+        .args(["cache", "verify"])
+        .assert()
+        .success();
+    assert!(stdout_text(&verify).contains("ok       gt:tool@1.0.0"));
+
+    let cached_file = cache_root.join("bundles/gt/tool/1.0.0/.envoy/show_env.json");
+    fs::remove_file(&cached_file).expect("a cached file should be removable");
+    let damaged = caching_command(&cache_root)
+        .args(["cache", "verify"])
+        .assert()
+        .code(1);
+    assert!(stdout_text(&damaged).contains("DAMAGED  gt:tool@1.0.0"));
+
+    let dry_run = caching_command(&cache_root)
+        .args(["cache", "clear", "--dry-run"])
+        .assert()
+        .success();
+    assert!(stdout_text(&dry_run).contains("Would remove 1 entry"));
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+
+    let clear = caching_command(&cache_root)
+        .args(["cache", "clear"])
+        .assert()
+        .success();
+    assert!(stdout_text(&clear).contains("Removed 1 entry"));
+    assert!(!cache_root.join("bundles/gt/tool/1.0.0").exists());
+}
+
+#[test]
+fn cache_is_only_the_cache_command_when_an_action_follows() {
+    let scratch = ScratchDir::new("envoy_cache_word");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["cache", "bogus"])
+        .assert()
+        .code(1);
+
+    assert!(stderr_text(&assert).contains("Command 'cache' not found"));
+}
+
+#[test]
+fn noop_warms_the_whole_stack_and_runs_nothing() {
+    let scratch = ScratchDir::new("envoy_noop_stack");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--noop")
+        .assert()
+        .success();
+
+    let stdout = stdout_text(&assert);
+    assert!(stdout.contains("Copied 2 bundles"), "stdout was:\n{stdout}");
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+    assert!(
+        cache_root.join("bundles/gt/extra/2.0.0").is_dir(),
+        "a bundle no command needs is still warmed when none is named"
+    );
+
+    let again = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["cache", "warm"])
+        .assert()
+        .success();
+    assert!(stdout_text(&again).contains("Copied 0 bundles"));
+    assert!(stdout_text(&again).contains("2 already cached"));
+}
+
+#[test]
+fn noop_with_a_command_warms_only_what_it_needs() {
+    let scratch = ScratchDir::new("envoy_noop_command");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["--noop", "show"])
+        .assert()
+        .success();
+
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+    assert!(!cache_root.join("bundles/gt/extra").exists());
+
+    let missing = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["--noop", "nothing-like-it"])
+        .assert()
+        .code(1);
+    assert!(stderr_text(&missing).contains("Command 'nothing-like-it' not found"));
+}
+
+#[test]
+fn noop_says_so_when_caching_is_off() {
+    let scratch = ScratchDir::new("envoy_noop_off");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = base_command()
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--noop")
+        .env("ENVOY_CACHE_ROOT", &cache_root)
+        .assert()
+        .success();
+
+    assert!(stdout_text(&assert).contains("Caching is off"));
+    assert!(!cache_root.exists());
+}
+
+#[test]
+fn flags_override_the_environment_for_one_run() {
+    let scratch = ScratchDir::new("envoy_cache_flags");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("flagged");
+
+    // The base command sets ENVOY_CACHE=off, so --cache on has to beat it.
+    base_command()
+        .args(["--cache", "on", "--no-prune", "--cache-root"])
+        .arg(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+    assert!(
+        !cache_root.join("last-prune").exists(),
+        "--no-prune must leave the background prune alone"
+    );
+
+    let pruning_root = scratch.path().join("pruning");
+    caching_command(&pruning_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+    assert!(pruning_root.join("last-prune").is_file());
+
+    let bad = base_command()
+        .args(["--cache", "maybe", "show"])
+        .assert()
+        .code(1);
+    assert!(stderr_text(&bad).contains("--cache takes 'on' or 'off', not 'maybe'"));
+}
+
+#[test]
+fn diagnose_shows_how_each_bundle_stands_with_the_cache() {
+    let scratch = ScratchDir::new("envoy_diagnose_standing");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let before = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--diagnose")
+        .assert()
+        .success();
+    let stdout = stdout_text(&before);
+    assert!(stdout.contains("[not cached yet]"), "stdout was:\n{stdout}");
+    assert!(!cache_root.exists(), "diagnosing must not create the cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    let after = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--diagnose")
+        .assert()
+        .success();
+    let stdout = stdout_text(&after);
+    assert!(stdout.contains("[cached]"), "stdout was:\n{stdout}");
+    assert!(
+        stdout.contains("[not cached yet]"),
+        "the bundle `show` does not use is still waiting:\n{stdout}"
+    );
+}
+
 /// A developer's own checkout must never be silently swapped for a cached
 /// snapshot, even when a bundle-cache entry exists under the same bndlid.
 #[test]
