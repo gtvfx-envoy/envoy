@@ -169,7 +169,10 @@ fn copy_file(source: &Path, staging: &Path, file: &PlannedFile) -> Result<()> {
     let mut attempt = 0;
     loop {
         match fs::copy(&from, &to) {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                keep_modified_time(&from, &to);
+                return Ok(());
+            }
             Err(error) if attempt + 1 < COPY_ATTEMPTS && is_transient(&error) => {
                 attempt += 1;
                 thread::sleep(Duration::from_millis(100 * u64::from(attempt)));
@@ -178,6 +181,24 @@ fn copy_file(source: &Path, staging: &Path, file: &PlannedFile) -> Result<()> {
         }
     }
 }
+
+/// Give the copy the original's modified time.
+///
+/// Windows copies it already. Elsewhere `fs::copy` keeps permissions only, and
+/// compiled Python is judged stale when its source's time differs from the one
+/// it recorded, so a copy with a new time would be recompiled on every machine.
+#[cfg(unix)]
+fn keep_modified_time(from: &Path, to: &Path) {
+    if let Ok(modified) = fs::metadata(from).and_then(|metadata| metadata.modified()) {
+        // A read-only handle is enough: the copy is ours, and so is its time.
+        if let Ok(copy) = fs::File::open(to) {
+            let _ = copy.set_modified(modified);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_modified_time(_from: &Path, _to: &Path) {}
 
 #[cfg(unix)]
 fn create_link(target: &Path, link: &Path) -> Result<()> {
@@ -193,6 +214,9 @@ fn create_link(_target: &Path, link: &Path) -> Result<()> {
 }
 
 /// Count the files and bytes under `directory`, to compare with the plan.
+///
+/// The store's own `.store` directory at the top is left out, so a staged copy
+/// and a finished entry measure the same.
 pub(crate) fn measure(directory: &Path) -> io::Result<(u64, u64)> {
     let mut files = 0;
     let mut bytes = 0;
@@ -201,6 +225,10 @@ pub(crate) fn measure(directory: &Path) -> io::Result<(u64, u64)> {
     while let Some(current) = pending.pop() {
         for entry in fs::read_dir(&current)? {
             let entry = entry?;
+            if current == directory && entry.file_name() == STATE_DIR {
+                continue;
+            }
+
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
                 pending.push(entry.path());

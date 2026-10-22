@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime};
 use tempfile::{tempdir, TempDir};
 
 use crate::refusal::{self, Refusal};
-use crate::{EntryKey, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError, STORE_FORMAT};
+use crate::{
+    EntryKey, Health, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError, STORE_FORMAT,
+};
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -606,6 +608,106 @@ fn prune_forgets_idle_refusals_and_clear_forgets_them_all() {
     assert!(!recent.exists());
 }
 
+#[test]
+fn verify_tells_intact_entries_from_damaged_ones() {
+    let fixture = fixture();
+    let key = key("1.0.0");
+    let ensured = fixture
+        .store
+        .ensure(&key, &fixture.source, &Quiet)
+        .expect("entry is cached");
+    let one = ensured.path.join("lib/a/one.py");
+    assert_eq!(fixture.store.verify()[0].health, Health::Intact);
+
+    fs::remove_file(&one).expect("file is removed");
+    match &fixture.store.verify()[0].health {
+        Health::Damaged(text) => assert!(text.contains("holds 3 files and 11 bytes"), "{text}"),
+        other => panic!("a missing file should be reported, got {other:?}"),
+    }
+
+    write(&one, "one");
+    assert_eq!(fixture.store.verify()[0].health, Health::Intact);
+
+    write(&ensured.path.join("stray.txt"), "added later");
+    assert!(matches!(
+        fixture.store.verify()[0].health,
+        Health::Damaged(_)
+    ));
+}
+
+#[test]
+fn verify_flags_unfinished_entries_and_spares_newer_ones() {
+    let fixture = fixture();
+    write(
+        &fixture
+            .store
+            .entry_path(&key("1.0.0"))
+            .join(".store/state.json"),
+        r#"{"format": 1, "complete": false, "bytes": 1, "files": 1, "source": "x", "filled_at": 0, "created_by": "0.0.0"}"#,
+    );
+    write(
+        &fixture
+            .store
+            .entry_path(&key("2.0.0"))
+            .join(".store/state.json"),
+        r#"{"format": 99, "complete": true, "bytes": 1, "files": 1, "source": "x", "filled_at": 0, "created_by": "9.9.9"}"#,
+    );
+    fs::create_dir_all(fixture.store.entry_path(&key("3.0.0"))).expect("bare directory");
+
+    let health: Vec<Health> = fixture
+        .store
+        .verify()
+        .into_iter()
+        .map(|verdict| verdict.health)
+        .collect();
+
+    assert!(matches!(&health[0], Health::Damaged(text) if text.contains("never finished")));
+    assert_eq!(health[1], Health::Newer(99));
+    assert!(matches!(&health[2], Health::Damaged(text) if text.contains("no readable record")));
+}
+
+#[test]
+fn open_existing_never_creates_a_store() {
+    let temp = tempdir().expect("tempdir is created");
+    let root = temp.path().join("store");
+
+    assert!(Store::open_existing(&root)
+        .expect("a missing store is not an error")
+        .is_none());
+    assert!(!root.exists(), "looking must not create the store");
+
+    Store::open(&root).expect("store opens");
+    assert!(Store::open_existing(&root)
+        .expect("an existing store opens")
+        .is_some());
+}
+
+#[cfg(windows)]
+#[test]
+fn refusals_lists_what_does_not_fit_without_touching_the_record() {
+    let temp = tempdir().expect("tempdir is created");
+    let (store, source) = too_deep_for_the_store(temp.path());
+    let key = key("1.0.0");
+    assert!(store.refusals().is_empty());
+    store
+        .ensure(&key, &source, &Quiet)
+        .expect_err("the entry does not fit");
+
+    let listed = store.refusals();
+
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].0, key);
+    assert!(matches!(
+        listed[0].1,
+        StoreError::PathTooLong {
+            remembered: true,
+            ..
+        }
+    ));
+    assert!(store.refusal(&key).is_some());
+    assert!(store.refusal_path(&key).exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn symbolic_links_are_recreated_as_links() {
@@ -643,4 +745,39 @@ fn file_permissions_survive_the_copy() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o755);
+}
+
+#[cfg(unix)]
+#[test]
+fn modified_times_survive_the_copy_even_for_read_only_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let module = fixture.source.join("lib/a/one.py");
+    let long_ago = SystemTime::now() - 400 * DAY;
+    File::options()
+        .write(true)
+        .open(&module)
+        .expect("module opens")
+        .set_modified(long_ago)
+        .expect("time is set");
+    fs::set_permissions(&module, fs::Permissions::from_mode(0o444)).expect("chmod");
+
+    let ensured = fixture
+        .store
+        .ensure(&key("1.0.0"), &fixture.source, &Quiet)
+        .unwrap();
+
+    let copied = fs::metadata(ensured.path.join("lib/a/one.py"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let difference = match copied.duration_since(long_ago) {
+        Ok(difference) => difference,
+        Err(error) => error.duration(),
+    };
+    assert!(
+        difference < Duration::from_secs(2),
+        "the copy's time should match the original, but differs by {difference:?}"
+    );
 }

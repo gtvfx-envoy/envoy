@@ -38,7 +38,7 @@ pub use key::EntryKey;
 pub use lock::Lease;
 pub use observer::{Observer, Quiet};
 pub use state::{EntryState, STORE_FORMAT};
-pub use store::{Ensured, EntryInfo, Outcome, PrunePolicy, PruneReport, Store};
+pub use store::{Ensured, EntryInfo, Health, Outcome, PrunePolicy, PruneReport, Store, Verdict};
 
 #[cfg(test)]
 mod tests;

@@ -150,6 +150,26 @@ pub struct PruneReport {
     pub freed_bytes: u64,
 }
 
+/// How an entry fared in [`Store::verify`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Health {
+    /// What is on disk matches what was recorded when it was filled.
+    Intact,
+    /// Written by a newer envoy, so this one cannot judge it.
+    Newer(u32),
+    /// Something is wrong with it; the text says what.
+    Damaged(String),
+}
+
+/// The result of checking one entry.
+#[derive(Clone, Debug)]
+pub struct Verdict {
+    /// The entry that was checked.
+    pub key: EntryKey,
+    /// What was found.
+    pub health: Health,
+}
+
 /// A name-addressed store of published bundles.
 ///
 /// ```text
@@ -198,6 +218,17 @@ impl Store {
         }
 
         Ok(Self { root })
+    }
+
+    /// Open the store at `root` only if it already exists.
+    ///
+    /// Looking at a store must not create one, so read-only commands use this.
+    pub fn open_existing(root: impl Into<PathBuf>) -> Result<Option<Self>> {
+        let root = root.into();
+        if !root.join(STORE_FILE).is_file() {
+            return Ok(None);
+        }
+        Self::open(root).map(Some)
     }
 
     /// Return the store's root directory.
@@ -466,6 +497,47 @@ impl Store {
         }
     }
 
+    /// Why `key` cannot be cached here, when an earlier run found that and it
+    /// still holds.
+    ///
+    /// Only reads: the record is neither refreshed nor removed.
+    pub fn refusal(&self, key: &EntryKey) -> Option<StoreError> {
+        let record = refusal::read(&self.refusal_path(key))?;
+        self.check_path_budget(key, record.longest, true).err()
+    }
+
+    /// Every refusal that still holds, ordered by identity.
+    pub fn refusals(&self) -> Vec<(EntryKey, StoreError)> {
+        let Ok(records) = fs::read_dir(self.refused_dir()) else {
+            return Vec::new();
+        };
+
+        let mut found: Vec<(EntryKey, StoreError)> = records
+            .flatten()
+            .filter_map(|record| {
+                let key = EntryKey::from_refusal_file_name(&record.file_name().to_string_lossy())?;
+                let error = self.refusal(&key)?;
+                Some((key, error))
+            })
+            .collect();
+        found.sort_by_key(|(key, _)| key.to_string());
+        found
+    }
+
+    /// Check every entry against what was recorded when it was filled.
+    ///
+    /// This catches an entry whose fill never finished and files that were
+    /// deleted, added or resized since. It does not read file contents.
+    pub fn verify(&self) -> Vec<Verdict> {
+        self.list()
+            .into_iter()
+            .map(|info| Verdict {
+                health: check_entry(&info),
+                key: info.key,
+            })
+            .collect()
+    }
+
     fn check_free_space(&self, key: &EntryKey, plan: &fill::Plan) -> Result<()> {
         let needed = plan.bytes.saturating_add(SPACE_HEADROOM);
         match fs4::available_space(&self.root) {
@@ -635,6 +707,27 @@ impl Store {
 
         lock.unlock()?;
         Ok(removed)
+    }
+}
+
+fn check_entry(info: &EntryInfo) -> Health {
+    let Some(state) = info.state.as_ref() else {
+        return Health::Damaged("it has no readable record of having been filled".to_string());
+    };
+    if state.format > STORE_FORMAT {
+        return Health::Newer(state.format);
+    }
+    if !is_usable(state) {
+        return Health::Damaged("its fill never finished".to_string());
+    }
+
+    match fill::measure(&info.path) {
+        Ok((files, bytes)) if files == state.files && bytes == state.bytes => Health::Intact,
+        Ok((files, bytes)) => Health::Damaged(format!(
+            "it was filled with {} files and {} bytes, but holds {files} files and {bytes} bytes",
+            state.files, state.bytes
+        )),
+        Err(error) => Health::Damaged(format!("it could not be read: {error}")),
     }
 }
 

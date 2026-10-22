@@ -79,6 +79,14 @@ impl EntryKey {
     pub(crate) fn refusal_file_name(&self) -> String {
         format!("{}~{}~{}.json", self.namespace, self.name, self.version)
     }
+
+    /// Rebuild a key from the name of its refusal record.
+    pub(crate) fn from_refusal_file_name(file_name: &str) -> Option<Self> {
+        let stem = file_name.strip_suffix(".json")?;
+        let mut parts = stem.splitn(3, '~');
+        let (namespace, name, version) = (parts.next()?, parts.next()?, parts.next()?);
+        Self::new(namespace, name, version).ok()
+    }
 }
 
 impl fmt::Display for EntryKey {
