@@ -567,6 +567,18 @@ fn listing_commands_never_copies_a_bundle() {
     );
 }
 
+/// Whether the directory `show` printed is `expected`, however either is spelled.
+///
+/// A temp directory may be written with short names that envoy prints in full,
+/// so both sides are canonicalized before they are compared.
+fn ran_from(assert: &assert_cmd::assert::Assert, expected: &Path) -> bool {
+    let printed = stdout_text(assert);
+    match (fs::canonicalize(printed.trim()), fs::canonicalize(expected)) {
+        (Ok(printed), Ok(expected)) => printed == expected,
+        _ => false,
+    }
+}
+
 #[test]
 fn a_command_runs_from_a_cached_copy_of_only_the_bundles_it_uses() {
     let scratch = ScratchDir::new("envoy_run_caches_used_bundles");
@@ -589,10 +601,7 @@ fn a_command_runs_from_a_cached_copy_of_only_the_bundles_it_uses() {
         shown.contains(&cache_root.display().to_string()),
         "the command should run from the cache, stdout was:\n{shown}"
     );
-    assert!(
-        !shown.contains(&tool.display().to_string()),
-        "stdout was:\n{shown}"
-    );
+    assert!(!ran_from(&first, &tool), "stdout was:\n{shown}");
     assert!(stderr_text(&first).contains("caching gt:tool@1.0.0"));
     assert!(cache_root.join("bundles/gt/tool/1.0.0/.envoy").is_dir());
     assert!(
@@ -624,7 +633,11 @@ fn caching_can_be_switched_off() {
         .assert()
         .success();
 
-    assert!(stdout_text(&assert).contains(&tool.display().to_string()));
+    assert!(
+        ran_from(&assert, &tool),
+        "stdout was:\n{}",
+        stdout_text(&assert)
+    );
     assert!(
         !cache_root.exists(),
         "an off switch must not create the cache"
@@ -648,8 +661,9 @@ fn an_unusable_cache_falls_back_to_the_share_with_one_warning() {
         .success();
 
     assert!(
-        stdout_text(&assert).contains(&tool.display().to_string()),
-        "the command should still run, from the share"
+        ran_from(&assert, &tool),
+        "the command should still run, from the share; stdout was:\n{}",
+        stdout_text(&assert)
     );
     let stderr = stderr_text(&assert);
     assert_eq!(
