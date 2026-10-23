@@ -145,6 +145,29 @@ def writeManySmallFiles(bundle: Path, count: int) -> None:
         (directory / f"module_{index:05d}.py").write_text(body, encoding="utf-8")
 
 
+def longPath(path: Path) -> Path:
+    """Return ``path`` in the form Windows accepts beyond 260 characters.
+
+    Without the extended-length prefix, a path that long can be neither created nor read where
+    long paths are off, which is how Windows ships. Other systems have no such limit.
+
+    Args:
+        path: An absolute or relative path.
+
+    Returns:
+        ``path`` with the extended-length prefix on Windows, otherwise unchanged.
+
+    """
+    if os.name != "nt":
+        return path
+    text = os.path.abspath(path)
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
 def writeDeepPaths(bundle: Path, levels: int) -> None:
     """Add a file under ``levels`` nested directories of 12 characters each.
 
@@ -153,7 +176,7 @@ def writeDeepPaths(bundle: Path, levels: int) -> None:
         levels: Directory depth; 12 levels reach a relative path near 170 characters.
 
     """
-    deep = bundle.joinpath(*(f"nested_{level:05d}" for level in range(levels)))
+    deep = longPath(bundle).joinpath(*(f"nested_{level:05d}" for level in range(levels)))
     deep.mkdir(parents=True)
     (deep / "leaf.txt").write_text("deep\n", encoding="utf-8")
 

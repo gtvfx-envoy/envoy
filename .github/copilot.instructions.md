@@ -148,6 +148,13 @@ cargo test --workspace
 self-hosted runners — see `lint.yml` — but plain `envoy-core`/`envoy-cli` changes
 don't need that.)
 
+For a change to `scripts/` or `tests/`, run the Python checks CI does:
+```powershell
+ruff check scripts tests
+ruff format --check scripts tests
+python -m pytest tests
+```
+
 ### Windows build noise
 `cargo build`/`cargo test` on Windows may print
 `note: did not finalize incremental compilation session directory ... Access is
