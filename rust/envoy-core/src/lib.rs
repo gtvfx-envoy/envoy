@@ -38,6 +38,7 @@ pub mod runtime;
 pub mod semver;
 pub mod stack;
 pub mod stack_registry;
+pub mod stack_snapshot;
 pub mod team_config;
 pub mod telemetry;
 pub mod user_config;

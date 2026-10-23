@@ -460,6 +460,25 @@ pub fn standing(bundle: &BundleInfo, store: Option<&Store>) -> Standing {
     }
 }
 
+/// The local copy of a published bundle, when the store holds one.
+///
+/// Nothing is copied and the bundle's source is never read, so this works
+/// when the share it came from cannot be reached.
+pub fn cached_copy(
+    store: &Store,
+    namespace: &str,
+    name: &str,
+    version: &str,
+) -> Option<BundleInfo> {
+    let key = EntryKey::new(namespace, name, version).ok()?;
+    store.lookup(&key)?;
+    Some(BundleInfo::new(
+        store.entry_path(&key),
+        name.to_string(),
+        namespace.to_string(),
+    ))
+}
+
 /// Load the registry for a caller that is about to run `command`, with the
 /// bundles it needs coming from the local store.
 ///
@@ -490,7 +509,9 @@ pub fn load_registry_for_run_with(
     env_override: Option<&str>,
     settings: &CacheSettings,
 ) -> crate::error::Result<(CommandRegistry, Option<Vec<BundleInfo>>)> {
-    let (registry, bundles) = crate::runtime::load_registry(bundle_roots, commands_file, None)?;
+    let snapshots = settings.enabled.then_some(settings.root.as_path());
+    let (registry, bundles) =
+        crate::runtime::load_registry_with_snapshots(bundle_roots, commands_file, None, snapshots)?;
     Ok(cache_for_command(
         registry,
         bundles,

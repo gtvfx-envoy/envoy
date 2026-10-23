@@ -61,7 +61,7 @@ pub use scan::{
 };
 pub use types::{Bundle, BundleInfo};
 pub use util::infer_namespace;
-pub(crate) use util::resolve_input_path;
+pub(crate) use util::{lexical_normalize, resolve_input_path};
 
 /// Discover bundles under the provided root directories.
 ///
@@ -95,13 +95,34 @@ pub fn discover_bundles_from_roots(root_dirs: &[String]) -> Vec<BundleInfo> {
 
 /// Discover bundles from the current stack, then fall back to bundle roots.
 pub fn discover_bundles_auto() -> Result<Vec<BundleInfo>> {
-    if let Some(stack) = crate::stack::Stack::current(
+    discover_bundles_auto_with(None)
+}
+
+/// [`discover_bundles_auto`] for a caller that is about to run something.
+///
+/// With a cache root in `snapshots`, a stack that loads is remembered there,
+/// and one whose share cannot be reached starts from the last time it ran
+/// (see [`Stack::from_selector`](crate::stack::Stack::from_selector)).
+pub fn discover_bundles_auto_with(snapshots: Option<&Path>) -> Result<Vec<BundleInfo>> {
+    if let Some(stack) = crate::stack::Stack::current_with_snapshots(
         false,
         None,
         crate::stack::DEFAULT_STACK_NAMESPACE,
         crate::stack::DEFAULT_STACK_MAX_DEPTH,
+        snapshots,
     )? {
-        return stack.bundle_infos();
+        let bundles = stack.bundle_infos()?;
+        if let Some(root) = snapshots {
+            if let Err(error) = stack.save_snapshot(root) {
+                tracing::debug!("Could not remember stack {}: {error}", stack.name());
+            }
+        }
+        if let Some(info) = stack.snapshot_info() {
+            for line in info.describe(stack.name(), stack.registry_version()) {
+                eprintln!("{line}");
+            }
+        }
+        return Ok(bundles);
     }
 
     let roots_str = env::var(BUNDLE_ROOTS_VAR).unwrap_or_default();

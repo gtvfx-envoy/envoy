@@ -204,6 +204,52 @@ pub fn is_stack_name(value: &str) -> bool {
         && !value.contains(':')
 }
 
+/// The configured stack roots that cannot be reached right now.
+pub fn unreachable_stack_roots() -> Vec<PathBuf> {
+    stack_roots()
+        .into_iter()
+        .filter(|root| !root.is_dir())
+        .collect()
+}
+
+/// What looking for a named stack in `ENVOY_STACK_ROOTS` turned up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamedStackLookup {
+    /// The path of the stack's latest published file.
+    Found(PathBuf),
+    /// No root that could be reached publishes the name.
+    Missing {
+        /// The configured roots that could not be reached. Any of them might
+        /// publish the name, so it may exist although it was not found.
+        unreachable: Vec<PathBuf>,
+    },
+}
+
+/// Look for a named stack, noting the roots that could not be searched.
+///
+/// Searches the roots like [`resolve_named_stack`]. A root is only checked for
+/// reachability when it does not publish the name, so a stack that is found
+/// costs nothing extra.
+pub fn lookup_named_stack(name: &str) -> NamedStackLookup {
+    let mut unreachable = Vec::new();
+
+    for root in stack_roots() {
+        let name_dir = root.join(name);
+        if !name_dir.is_dir() {
+            if !root.is_dir() {
+                unreachable.push(root);
+            }
+            continue;
+        }
+
+        if let Some((_, stack_path)) = latest_stack(&name_dir, name) {
+            return NamedStackLookup::Found(stack_path);
+        }
+    }
+
+    NamedStackLookup::Missing { unreachable }
+}
+
 /// Resolve a named stack to the path of its latest version.
 ///
 /// Searches each directory in `ENVOY_STACK_ROOTS` for a subdirectory named
@@ -211,18 +257,20 @@ pub fn is_stack_name(value: &str) -> bool {
 /// otherwise falls back to the published version whose `.estack` file has the
 /// newest modified time. Returns the first match.
 pub fn resolve_named_stack(name: &str) -> Option<PathBuf> {
-    for root in stack_roots() {
-        let name_dir = root.join(name);
-        if !name_dir.is_dir() {
-            continue;
-        }
-
-        if let Some((_, stack_path)) = latest_stack(&name_dir, name) {
-            return Some(stack_path);
-        }
+    match lookup_named_stack(name) {
+        NamedStackLookup::Found(path) => Some(path),
+        NamedStackLookup::Missing { .. } => None,
     }
+}
 
-    None
+/// The version a published stack file belongs to: the name of the directory
+/// that holds it.
+pub fn published_version(stack_path: &Path) -> String {
+    stack_path
+        .parent()
+        .and_then(Path::file_name)
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// List all available named stacks across all `ENVOY_STACK_ROOTS` roots.
