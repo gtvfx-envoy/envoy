@@ -21,8 +21,9 @@ use envoy_core::runtime::{
 };
 use envoy_core::stack::{Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_SETTING};
 use envoy_core::stack_registry::{
-    is_stack_name, list_named_stacks, NamedStackEntry, STACK_ROOTS_VAR,
+    is_stack_name, list_named_stacks, unreachable_stack_roots, NamedStackEntry, STACK_ROOTS_VAR,
 };
+use envoy_core::stack_snapshot::{ago, remembered as remembered_stacks};
 use envoy_core::telemetry::{CommandKind, CommandRunContext, ErrorCategory};
 use envoy_core::user_config::{known_settings, UserConfig};
 use envoy_core::wrapper::ApplicationWrapper;
@@ -273,7 +274,7 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
     }
 
     if cli.list_stacks {
-        let exit_code = handle_list_stacks();
+        let exit_code = handle_list_stacks(&cli);
         return emission(CommandKind::ListStacks).emit_and_return(exit_code);
     }
 
@@ -314,7 +315,7 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
         registry,
         bundles,
         stack,
-    } = match load_registry_for_cli(&cli, verbose) {
+    } = match load_registry_for_cli(&cli, verbose, &cache) {
         Ok(result) => result,
         Err(code) => {
             return emission(CommandKind::ResolutionFailure)
@@ -432,6 +433,7 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
     // launching anything: they only copy bundles into the cache.
     let warm_action = cache_cmd::action(cli.command.as_deref(), &cli.args) == Some("warm");
     if cli.noop || warm_action {
+        remember_stack(stack.as_ref(), &cache, verbose);
         let target = if warm_action {
             cli.args.get(1).map(String::as_str)
         } else {
@@ -465,7 +467,9 @@ fn run_cli(cli: Cli, raw_argv: &[String]) -> i32 {
     };
 
     // Everything above only read bundle metadata. A command that is about to
-    // run needs its bundles on local disk, so cache the ones it uses now.
+    // run needs its bundles on local disk, so cache the ones it uses now, and
+    // remember the stack so that it can start again without its share.
+    remember_stack(stack.as_ref(), &cache, verbose);
     let (registry, bundles) =
         cache_for_command(registry, bundles, command_name, cli.env.as_deref(), &cache);
 
@@ -506,7 +510,11 @@ fn cache_settings(cli: &Cli) -> Result<CacheSettings, String> {
         .with_prune(!cli.no_prune))
 }
 
-fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32> {
+fn load_registry_for_cli(
+    cli: &Cli,
+    verbose: bool,
+    cache: &CacheSettings,
+) -> Result<LoadedRegistry, i32> {
     let mut registry = CommandRegistry::empty();
     let mut bundles = None;
 
@@ -518,14 +526,20 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
         }
     };
 
+    // Where a stack that has run is remembered, so that it can start again
+    // when its share cannot be reached. With caching off nothing is kept or
+    // used.
+    let snapshots = cache.enabled.then_some(cache.root.as_path());
+
     let selected_stack = if let Some(raw_value) = cli.stack.as_deref() {
-        Some(resolve_stack_value(raw_value, verbose)?)
+        Some(resolve_stack_value(raw_value, verbose, snapshots)?)
     } else {
-        match Stack::current(
+        match Stack::current_with_snapshots(
             cli.ignore_config,
             None,
             DEFAULT_STACK_NAMESPACE,
             DEFAULT_STACK_MAX_DEPTH,
+            snapshots,
         ) {
             Ok(stack) => stack,
             Err(error) => {
@@ -534,6 +548,9 @@ fn load_registry_for_cli(cli: &Cli, verbose: bool) -> Result<LoadedRegistry, i32
             }
         }
     };
+    if let Some(stack) = selected_stack.as_ref() {
+        note_snapshot(stack);
+    }
 
     // Bundles load from their source paths here. Copying a bundle to local
     // disk waits until a command is about to run (see `cache_for_command`),
@@ -706,16 +723,17 @@ fn apply_overrides_or_bail(
     Err(1)
 }
 
-fn resolve_stack_value(raw: &str, verbose: bool) -> Result<Stack, i32> {
-    if is_stack_name(raw) {
-        // A single `Stack::from_name` call both resolves and loads the
-        // named stack; it returns the same "not found" validation error
-        // `resolve_named_stack` would have surfaced separately, so there is
-        // no need to resolve twice (once here, once inside `from_name`).
-        let stack = Stack::from_name(raw).map_err(|error| {
-            eprintln!("Error loading named stack: {}", display_envoy_error(&error));
-            1
-        })?;
+fn resolve_stack_value(raw: &str, verbose: bool, snapshots: Option<&Path>) -> Result<Stack, i32> {
+    let named = is_stack_name(raw);
+    // A single call both resolves and loads the stack. A name that is not
+    // published, or a stack that is wrong, is an error; only a stack that
+    // cannot be reached falls back to the one remembered under `snapshots`.
+    let stack = Stack::from_selector(raw, snapshots).map_err(|error| {
+        let what = if named { "named stack" } else { "stack" };
+        eprintln!("Error loading {what}: {}", display_envoy_error(&error));
+        1
+    })?;
+    if named {
         debug(
             verbose,
             &format!(
@@ -723,13 +741,40 @@ fn resolve_stack_value(raw: &str, verbose: bool) -> Result<Stack, i32> {
                 stack.path().display()
             ),
         );
-        return Ok(stack);
     }
+    Ok(stack)
+}
 
-    Stack::new(raw).map_err(|error| {
-        eprintln!("Error loading stack: {}", display_envoy_error(&error));
-        1
-    })
+/// Tell the person when the stack was rebuilt from the last time it ran,
+/// because its share could not be reached.
+fn note_snapshot(stack: &Stack) {
+    if let Some(info) = stack.snapshot_info() {
+        for line in info.describe(stack.name(), stack.registry_version()) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// Keep what the stack came to, so it can start again without its share.
+///
+/// Only a run, or a warm-up, remembers a stack: looking at one must not write
+/// to the cache. Never worth failing a run for.
+fn remember_stack(stack: Option<&Stack>, cache: &CacheSettings, verbose: bool) {
+    let Some(stack) = stack.filter(|_| cache.enabled) else {
+        return;
+    };
+    match stack.save_snapshot(&cache.root) {
+        Ok(true) => debug(verbose, &format!("Remembered stack {}", stack.name())),
+        Ok(false) => {}
+        Err(error) => debug(
+            verbose,
+            &format!(
+                "Could not remember stack {}: {}",
+                stack.name(),
+                display_envoy_error(&error)
+            ),
+        ),
+    }
 }
 
 fn raw_path_without_env_override(command: Option<&str>, env_override: Option<&str>) -> bool {
@@ -787,6 +832,16 @@ fn run_diagnose(
             println!("  namespace: {}", stack.namespace());
             if let Some(version) = stack.registry_version() {
                 println!("  registry_version: {version}");
+            }
+            if let Some(info) = stack.snapshot_info() {
+                println!("  from a snapshot: {}", info.reason);
+                println!("  last resolved from its source: {} ago", info.ago());
+                if !info.unavailable.is_empty() {
+                    println!(
+                        "  not cached on this machine: {}",
+                        info.unavailable.join(", ")
+                    );
+                }
             }
         }
         None => println!("Current stack: none (using bundle-root fallback)"),
@@ -1720,31 +1775,73 @@ fn print_named_stack_entries(entries: &[NamedStackEntry]) {
     }
 }
 
-fn handle_list_stacks() -> i32 {
+fn handle_list_stacks(cli: &Cli) -> i32 {
     let named_stacks = list_named_stacks();
-    if named_stacks.is_empty() {
+    let unreachable = unreachable_stack_roots();
+
+    if !named_stacks.is_empty() {
+        println!("Available named stacks ({STACK_ROOTS_VAR}):");
+        println!();
+        print_named_stack_entries(&named_stacks);
+        println!();
+        println!("Usage:  envoy --stack <name>       (use for one invocation)");
+        println!("        envoy --set-stack <name>   (persist as the default)");
+    } else if unreachable.is_empty() {
         if env::var_os(STACK_ROOTS_VAR).is_some() {
             println!("No named stacks found in {STACK_ROOTS_VAR}.");
         } else {
             println!("No named stacks found (set {STACK_ROOTS_VAR} to search for named stacks).");
         }
-        return 0;
     }
 
-    println!("Available named stacks ({STACK_ROOTS_VAR}):");
-    println!();
-    print_named_stack_entries(&named_stacks);
-    println!();
-    println!("Usage:  envoy --stack <name>       (use for one invocation)");
-    println!("        envoy --set-stack <name>   (persist as the default)");
+    if !unreachable.is_empty() {
+        if !named_stacks.is_empty() {
+            println!();
+        }
+        let plural = if unreachable.len() == 1 { "" } else { "s" };
+        println!("Cannot reach the stack root{plural} in {STACK_ROOTS_VAR}:");
+        for root in &unreachable {
+            println!("  {}", root.display());
+        }
+        print_remembered_stacks(cli, &named_stacks);
+    }
     0
+}
+
+/// The stacks that ran on this machine before and can start without their
+/// share, other than the ones just listed.
+fn print_remembered_stacks(cli: &Cli, listed: &[NamedStackEntry]) {
+    let Some(cache) = cache_settings(cli).ok().filter(|cache| cache.enabled) else {
+        return;
+    };
+    let remembered: Vec<_> = remembered_stacks(&cache.root)
+        .into_iter()
+        .filter(|stack| !listed.iter().any(|entry| entry.name == stack.name))
+        .collect();
+    if remembered.is_empty() {
+        return;
+    }
+
+    println!();
+    println!("Stacks that ran on this machine start without their share:");
+    for stack in &remembered {
+        println!(
+            "  {:<20}  version: {}  (last resolved {} ago)",
+            stack.name,
+            stack.registry_version.as_deref().unwrap_or("-"),
+            ago(stack.confirmed)
+        );
+    }
+    println!();
+    println!("Usage:  envoy --stack <name>");
 }
 
 fn handle_set_stack(raw: &str, verbose: bool) -> i32 {
     // Validate before persisting: a bad value stored via --set-config
     // silently breaks every subsequent invocation until noticed, so
-    // --set-stack resolves it up front the same way a normal run would.
-    if let Err(code) = resolve_stack_value(raw, verbose) {
+    // --set-stack resolves it up front the same way a normal run would. It
+    // never settles for a remembered copy of a stack that cannot be reached.
+    if let Err(code) = resolve_stack_value(raw, verbose, None) {
         return code;
     }
 
