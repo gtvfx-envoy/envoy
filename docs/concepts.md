@@ -18,7 +18,7 @@ Bundles are the unit of distribution in the envoy ecosystem. A developer checks 
 
 ### Bundle ID (bndlid)
 
-Each bundle has a **bundle ID** (`bndlid`) of the form `<namespace>:<name>`. The namespace is inferred from the parent directory name:
+Each bundle has a **bundle ID** (`bndlid`) of the form `<namespace>:<name>`. A published bundle states its ID in its [`.bundle` marker](bundle-discovery.md#the-bundle-marker-file). A checkout has no marker, so its name is its directory name and its namespace is inferred from the parent directory name:
 
 ```mermaid
 graph TD
@@ -34,7 +34,7 @@ graph TD
     GT --> P
 ```
 
-The default namespace is `gt`. It can be overridden via the Python API.
+The default namespace is `gt`. It applies when the parent directory does not look like a namespace, and to a published bundle whose marker names it without a namespace. It can be overridden via the Python API.
 
 ## Commands
 

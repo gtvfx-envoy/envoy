@@ -77,15 +77,17 @@ Set `ENVOY_BNDL_ROOTS` to a semicolon-separated list of root directories. Envoy 
 
 Every bundle published through
 [Envoy Utils](https://github.com/gtvfx-envoy/envoy_utils) contains a
-`.bundle` file at its root. This file serves two purposes:
+`.bundle` file at its root. This file serves three purposes:
 
 1. **Discovery marker** — `ENVOY_BNDL_ROOTS` scanning accepts it alongside `.git/` so deployed bundles are auto-discovered without a Stack.
 2. **Version metadata** — `Bundle.version` and `Bundle.is_production` read from it.
+3. **Identity** — `bndlid` is the bundle's `<namespace>:<name>` ID, however the bundle is loaded (root scan, Stack, or path). A published bundle usually sits in a version directory (`.../python/3.11.9/`), so envoy never derives its ID from the directory name. A marker that names the bundle without a namespace (`"bndlid": "globals"`, or only `"name"`) gets the default namespace `gt`.
 
 ### Format
 
 ```json
 {
+  "bndlid": "gt:globals",
   "name": "globals",
   "version": "v1.0.0",
   "published": "2026-06-21T10:13:00+00:00"
@@ -93,6 +95,14 @@ Every bundle published through
 ```
 
 After extracting a published zip under a bundle root, envoy discovers it automatically — no `studio.estack` required.
+
+### Version ordering
+
+Bundle versions follow SemVer, with one convention: the prerelease label `envoy` is reserved for **packaging revisions** of third-party software. `3.11.9-envoy.2` is the second repackaging of Python 3.11.9. A revision sorts *after* the version it repackages and counts as stable. Any other label (`alpha`, `rc`) marks a prerelease that sorts *before* the release:
+
+```
+3.11.9-rc.1  <  3.11.9  <  3.11.9-envoy.1  <  3.11.9-envoy.2  <  3.11.10
+```
 
 ## Method 2 — Runtime Stack
 

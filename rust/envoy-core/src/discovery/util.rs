@@ -109,33 +109,6 @@ pub fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn name_and_namespace(bundle_root: &Path) -> (String, String) {
-    let marker = bundle_root.join(super::BUNDLE_MARKER_FILE);
-    if marker.is_file() {
-        if let Ok(text) = fs::read_to_string(marker) {
-            if let Ok(data) = serde_json::from_str::<Value>(&text) {
-                if let Some(bndlid) = data.get("bndlid").and_then(Value::as_str) {
-                    if let Some((namespace, name)) = bndlid.split_once(':') {
-                        return (name.to_string(), namespace.to_string());
-                    }
-                }
-
-                if let Some(name) = data.get("name").filter(|value| json_value_truthy(value)) {
-                    return (json_value_to_string(name), infer_namespace(bundle_root));
-                }
-            }
-        }
-    }
-
-    (
-        bundle_root
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        infer_namespace(bundle_root),
-    )
-}
-
 pub fn json_value_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,

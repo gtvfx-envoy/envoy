@@ -3,6 +3,11 @@
 //! This module implements semver parsing with optional `v` prefix, prerelease
 //! handling per [SEMVER 2.0.0], and a simple constraint language (`>=1.0.0`,
 //! `<2.0.0`, `^1.2`, `~1.2.3`, `==1.0.0`).
+//!
+//! One extension to SEMVER 2.0.0: the prerelease label `envoy` is reserved for
+//! packaging revisions of an upstream release (`3.11.9-envoy.2` is the second
+//! repackaging of 3.11.9). A revision is a release, not a prerelease: it sorts
+//! after the version it repackages and counts as stable.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -27,6 +32,9 @@ pub enum SemVerError {
         versions: String,
     },
 }
+
+/// Prerelease label reserved for packaging revisions of an upstream release.
+const REVISION_LABEL: &str = "envoy";
 
 fn semver_regex() -> &'static Regex {
     use std::sync::OnceLock;
@@ -130,9 +138,21 @@ impl SemVer {
         }
     }
 
-    /// Return `true` if this is a prerelease version (has a prerelease tag).
+    /// Return `true` if this is a prerelease version.
+    ///
+    /// A packaging revision such as `1.2.3-envoy.2` has a prerelease tag but is
+    /// a release, so it is not a prerelease; see [`SemVer::is_revision`].
     pub fn is_prerelease(&self) -> bool {
-        self.prerelease.is_some()
+        self.prerelease.is_some() && !self.is_revision()
+    }
+
+    /// Return `true` if this is a packaging revision of an upstream release.
+    ///
+    /// Revisions carry the reserved prerelease label `envoy` (for example
+    /// `3.11.9-envoy.2`). They sort after the version they repackage and count
+    /// as stable.
+    pub fn is_revision(&self) -> bool {
+        self.prerelease_label() == Some(REVISION_LABEL)
     }
 }
 
@@ -172,26 +192,30 @@ impl Ord for SemVer {
     }
 }
 
-fn compare_prerelease(left: Option<&str>, right: Option<&str>) -> Ordering {
-    match (left, right) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Greater, // stable > prerelease
-        (Some(_), None) => Ordering::Less,
-        (Some(left), Some(right)) => {
-            let left_parts = split_prerelease(left);
-            let right_parts = split_prerelease(right);
+/// Position within one `MAJOR.MINOR.PATCH`, in ascending order: prereleases,
+/// the release itself, then packaging revisions of it.
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum Stage<'a> {
+    Prerelease { label: &'a str, number: Option<u64> },
+    Release,
+    Revision { number: Option<u64> },
+}
 
-            left_parts
-                .0
-                .cmp(right_parts.0)
-                .then_with(|| match (left_parts.1, right_parts.1) {
-                    (None, None) => Ordering::Equal,
-                    (None, Some(_)) => Ordering::Less,
-                    (Some(_), None) => Ordering::Greater,
-                    (Some(left_number), Some(right_number)) => left_number.cmp(&right_number),
-                })
-        }
+fn stage(prerelease: Option<&str>) -> Stage<'_> {
+    let Some(value) = prerelease else {
+        return Stage::Release;
+    };
+
+    let (label, number) = split_prerelease(value);
+    if label == REVISION_LABEL {
+        Stage::Revision { number }
+    } else {
+        Stage::Prerelease { label, number }
     }
+}
+
+fn compare_prerelease(left: Option<&str>, right: Option<&str>) -> Ordering {
+    stage(left).cmp(&stage(right))
 }
 
 fn split_prerelease(value: &str) -> (&str, Option<u64>) {
@@ -388,7 +412,10 @@ pub fn resolve_latest(versions: &[SemVer], spec: &VersionSpec) -> Option<SemVer>
     sorted.into_iter().find(|v| spec.matches(v))
 }
 
-/// Resolve the latest **stable** (non-prerelease) version from a list that satisfies the given spec.
+/// Resolve the latest **stable** version from a list that satisfies the given spec.
+///
+/// Prereleases (`1.0.0-rc.1`) are skipped; packaging revisions
+/// (`3.11.9-envoy.2`) count as stable.
 pub fn resolve_latest_stable(versions: &[SemVer], spec: &VersionSpec) -> Option<SemVer> {
     let mut stable: Vec<SemVer> = versions
         .iter()
@@ -426,6 +453,98 @@ mod tests {
         let a = SemVer::parse("1.0.0").unwrap();
         let b = SemVer::parse("1.0.0-alpha").unwrap();
         assert!(a > b);
+    }
+
+    #[test]
+    fn ordering_places_packaging_revisions_after_their_release() {
+        let ascending = [
+            "1.0.0-rc.1",
+            "1.0.0",
+            "3.11.9-alpha.1",
+            "3.11.9-rc.2",
+            "3.11.9",
+            "3.11.9-envoy",
+            "3.11.9-envoy.1",
+            "3.11.9-envoy.2",
+            "3.11.9-envoy.10",
+            "3.11.10-rc.1",
+            "3.11.10",
+        ]
+        .map(|value| SemVer::parse(value).unwrap());
+
+        for pair in ascending.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} should sort before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        let mut shuffled = ascending.iter().rev().cloned().collect::<Vec<_>>();
+        shuffled.sort();
+        assert_eq!(shuffled, ascending);
+    }
+
+    #[test]
+    fn packaging_revision_is_stable_not_a_prerelease() {
+        let revision = SemVer::parse("3.11.9-envoy.2").unwrap();
+        assert!(revision.is_revision());
+        assert!(!revision.is_prerelease());
+
+        let prerelease = SemVer::parse("1.0.0-rc.1").unwrap();
+        assert!(prerelease.is_prerelease());
+        assert!(!prerelease.is_revision());
+
+        let release = SemVer::parse("3.11.9").unwrap();
+        assert!(!release.is_prerelease());
+        assert!(!release.is_revision());
+    }
+
+    #[test]
+    fn constraints_treat_a_revision_as_part_of_its_release() {
+        let revision = SemVer::parse("3.11.9-envoy.1").unwrap();
+
+        for matching in [
+            ">=3.11.9",
+            "^3.11",
+            "~3.11.9",
+            ">3.11.9",
+            "<=3.11.10",
+            ">=0.0.0",
+        ] {
+            assert!(
+                Constraint::parse(matching).unwrap().matches(&revision),
+                "{matching} should match {revision}"
+            );
+        }
+        for excluded in ["<3.11.9", "<=3.11.9", "==3.11.9", "3.11.9", ">=3.11.10"] {
+            assert!(
+                !Constraint::parse(excluded).unwrap().matches(&revision),
+                "{excluded} should not match {revision}"
+            );
+        }
+
+        let bound = Constraint::parse(">=3.11.9-envoy.1").unwrap();
+        assert!(bound.matches(&SemVer::parse("3.11.9-envoy.2").unwrap()));
+        assert!(bound.matches(&SemVer::parse("3.12.0").unwrap()));
+        assert!(!bound.matches(&SemVer::parse("3.11.9").unwrap()));
+    }
+
+    #[test]
+    fn resolve_latest_stable_returns_the_newest_revision() {
+        let versions = ["3.11.9", "3.11.9-envoy.1", "3.11.9-envoy.2", "3.12.0-rc.1"]
+            .map(|value| SemVer::parse(value).unwrap());
+        let spec = VersionSpec::parse(">=0.0.0").unwrap();
+
+        assert_eq!(
+            resolve_latest_stable(&versions, &spec).unwrap().to_string(),
+            "3.11.9-envoy.2"
+        );
+        assert_eq!(
+            resolve_latest(&versions, &spec).unwrap().to_string(),
+            "3.12.0-rc.1"
+        );
     }
 
     #[test]

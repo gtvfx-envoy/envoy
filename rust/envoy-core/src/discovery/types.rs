@@ -9,7 +9,8 @@ use serde_json::Value;
 use crate::error::{EnvoyError, Result};
 
 use super::bndlid::{is_bndlid, parse_bndlid, resolve_bndlid};
-use super::util::{infer_namespace, json_value_to_string, json_value_truthy, resolve_input_path};
+use super::identity::bundle_identity;
+use super::util::{json_value_to_string, json_value_truthy, resolve_input_path};
 
 /// Information about a discovered bundle.
 #[derive(Clone, Eq, PartialEq)]
@@ -108,16 +109,20 @@ pub struct Bundle {
 
 impl Bundle {
     /// Construct a bundle from a bundle ID or filesystem path.
+    ///
+    /// A bundle ID keeps the ID it was resolved from. A path takes its
+    /// identity from [`bundle_identity`](super::bundle_identity); `namespace`,
+    /// when given, replaces the namespace of a path (it is ignored for a
+    /// bundle ID, which already carries one).
     pub fn new(spec: impl AsRef<Path>, namespace: Option<&str>) -> Result<Self> {
         let spec_path = spec.as_ref();
         let raw_spec = spec_path.as_os_str().to_string_lossy().into_owned();
 
-        let (root, namespace) = if is_bndlid(&raw_spec) {
-            let namespace = parse_bndlid(&raw_spec)
-                .expect("bundle-id regex must parse after is_bndlid() succeeds")
-                .0;
+        let (root, namespace, name) = if is_bndlid(&raw_spec) {
+            let (namespace, name) = parse_bndlid(&raw_spec)
+                .expect("bundle-id regex must parse after is_bndlid() succeeds");
 
-            (resolve_bndlid(&raw_spec)?, namespace)
+            (resolve_bndlid(&raw_spec)?, namespace, name)
         } else {
             let root = resolve_input_path(spec_path);
             if !root.is_dir() {
@@ -134,17 +139,13 @@ impl Bundle {
                 )));
             }
 
+            let identity = bundle_identity(&root);
             let namespace = namespace
                 .map(ToOwned::to_owned)
-                .unwrap_or_else(|| infer_namespace(&root));
+                .unwrap_or(identity.namespace);
 
-            (root, namespace)
+            (root, namespace, identity.name)
         };
-
-        let name = root
-            .file_name()
-            .map(|value| value.to_string_lossy().into_owned())
-            .unwrap_or_default();
 
         Ok(Self {
             info: BundleInfo::new(root, name, namespace),

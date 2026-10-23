@@ -225,6 +225,7 @@ pub fn resolve_cached_bundles(
     };
 
     let mut resolved_bundles = Vec::with_capacity(bundles.len());
+    let mut without_source = 0_usize;
 
     for bundle in bundles {
         // Never substitute a developer's own checkout for a cached copy.
@@ -236,7 +237,14 @@ pub fn resolve_cached_bundles(
         let bndlid = bundle.bndlid();
         let resolved_root = match cache.resolve(&bndlid, &wildcard_spec) {
             Ok(Some(cached)) => Some(cached.path),
-            Ok(None) => fetch_and_cache_published_bundle(&bundle, team_config, cache),
+            Ok(None) => match fetch_and_cache_published_bundle(&bundle, team_config, cache) {
+                FillOutcome::Filled(root) => Some(root),
+                FillOutcome::NoSource => {
+                    without_source += 1;
+                    None
+                }
+                FillOutcome::Failed => None,
+            },
             Err(error) => {
                 tracing::warn!(
                     bundle_id = %bndlid,
@@ -255,6 +263,14 @@ pub fn resolve_cached_bundles(
         } else {
             resolved_bundles.push(bundle);
         }
+    }
+
+    if without_source > 0 {
+        tracing::info!(
+            bundles = without_source,
+            "Published bundles are loaded from their source paths because no team config \
+provides a production bundle root to cache them from"
+        );
     }
 
     resolved_bundles
@@ -384,6 +400,17 @@ pub fn apply_bundle_overrides(
     (resolved_bundles, problems)
 }
 
+/// How an attempt to fill a published bundle's cache miss ended.
+enum FillOutcome {
+    /// The bundle was stored; this is its cached root.
+    Filled(PathBuf),
+    /// There is no team source to fill from. That is the normal state of a
+    /// machine without a team config, so it is not worth a warning.
+    NoSource,
+    /// A fill was expected to work but did not (already logged as a warning).
+    Failed,
+}
+
 /// Try to fill a published bundle cache miss from the team bundle root.
 ///
 /// The production bundle root is expected to mirror bundle discovery's
@@ -395,22 +422,22 @@ fn fetch_and_cache_published_bundle(
     bundle: &BundleInfo,
     team_config: Option<&TeamConfig>,
     cache: &mut BundleCache,
-) -> Option<PathBuf> {
+) -> FillOutcome {
     let bndlid = bundle.bndlid();
     let Some(team_config) = team_config else {
-        tracing::warn!(
+        tracing::debug!(
             bundle_id = %bndlid,
-            "Bundle cache miss could not be filled because no team config was resolved"
+            "Bundle cache miss not filled: no team config was resolved"
         );
-        return None;
+        return FillOutcome::NoSource;
     };
     let Some(prod_bundles_root) = team_config.prod_bundles_root.as_ref() else {
-        tracing::warn!(
+        tracing::debug!(
             bundle_id = %bndlid,
             team = %team_config.name,
-            "Bundle cache miss could not be filled because prod_bundles_root is not configured"
+            "Bundle cache miss not filled: prod_bundles_root is not configured"
         );
-        return None;
+        return FillOutcome::NoSource;
     };
 
     let version = Bundle::from_info(bundle.clone()).version();
@@ -420,7 +447,7 @@ fn fetch_and_cache_published_bundle(
             bundle_root = %bundle.root.display(),
             "Bundle cache miss could not be filled because the published version is unavailable"
         );
-        return None;
+        return FillOutcome::Failed;
     }
 
     let source_dir = prod_bundles_root
@@ -434,7 +461,7 @@ fn fetch_and_cache_published_bundle(
             source_dir = %source_dir.display(),
             "Bundle cache miss could not be filled because the bundle directory was not found"
         );
-        return None;
+        return FillOutcome::Failed;
     }
 
     let envoy_dir = source_dir.join(BUNDLE_ENV_DIR);
@@ -444,18 +471,18 @@ fn fetch_and_cache_published_bundle(
             source_dir = %source_dir.display(),
             "Bundle cache miss could not be filled because the bundle directory is invalid"
         );
-        return None;
+        return FillOutcome::Failed;
     }
 
     match cache.store(&bndlid, &version, &source_dir) {
-        Ok(cached) => Some(cached.path),
+        Ok(cached) => FillOutcome::Filled(cached.path),
         Err(error) => {
             tracing::warn!(
                 bundle_id = %bndlid,
                 source_dir = %source_dir.display(),
                 "Bundle cache miss could not be filled because storing the bundle failed: {error}"
             );
-            None
+            FillOutcome::Failed
         }
     }
 }
@@ -696,6 +723,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use serde_json::{json, Value};
     use tempfile::tempdir;
@@ -705,7 +733,9 @@ mod tests {
         prepare_env, python_program_names, resolve_cached_bundles, resolve_envoy_exe_from,
         resolve_team_config_for_bundles, BundleOverrideProblem,
     };
-    use crate::bundle_cache::BundleCache;
+    use crate::bundle_cache::{
+        open_default_bundle_cache, BundleCache, BUNDLE_CACHE_DIR_VAR, BUNDLE_CACHE_DISABLE_VAR,
+    };
     use crate::commands::CommandRegistry;
     use crate::discovery::{BundleInfo, BUNDLE_ENV_DIR};
     use crate::error::EnvoyError;
@@ -1435,6 +1465,137 @@ be substituted with the cached path"
             Some(&without_prod_root),
         );
         assert_eq!(resolved_without_prod_root[0].root, original.root);
+    }
+
+    /// Records the level of every tracing event emitted on this thread.
+    struct LevelRecorder(Arc<Mutex<Vec<tracing::Level>>>);
+
+    impl tracing::Subscriber for LevelRecorder {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.0
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(*event.metadata().level());
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn logged_levels(run: impl FnOnce()) -> Vec<tracing::Level> {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(LevelRecorder(Arc::clone(&recorded)), run);
+        let levels = recorded
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        levels
+    }
+
+    #[test]
+    fn resolve_cached_bundles_logs_a_missing_team_source_without_warning() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let maya = create_published_bundle(
+            temp_dir.path(),
+            "gt",
+            "maya",
+            "1.0.0",
+            &json!({"tool": {"alias": ["maya.exe"]}}),
+        );
+        let unreal = create_published_bundle(
+            temp_dir.path(),
+            "gt",
+            "unreal",
+            "1.0.0",
+            &json!({"tool": {"alias": ["unreal.exe"]}}),
+        );
+        let mut cache = BundleCache::new(temp_dir.path().join("cache")).expect("cache should open");
+        let without_prod_root = TeamConfig::empty();
+
+        for team_config in [None, Some(&without_prod_root)] {
+            let levels = logged_levels(|| {
+                let resolved = resolve_cached_bundles(
+                    vec![maya.clone(), unreal.clone()],
+                    Some(&mut cache),
+                    team_config,
+                );
+                assert_eq!(resolved[0].root, maya.root);
+                assert_eq!(resolved[1].root, unreal.root);
+            });
+
+            assert!(
+                !levels.contains(&tracing::Level::WARN),
+                "a machine without a team source is normal and must not warn: {levels:?}"
+            );
+            assert_eq!(
+                levels
+                    .iter()
+                    .filter(|level| **level == tracing::Level::INFO)
+                    .count(),
+                1,
+                "one summary line per run, not one per bundle: {levels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_cached_bundles_still_warns_when_a_configured_source_is_missing() {
+        let temp_dir = tempdir().expect("tempdir should be created");
+        let original = create_published_bundle(
+            temp_dir.path(),
+            "gt",
+            "maya",
+            "3.0.0",
+            &json!({"tool": {"alias": ["original.exe"]}}),
+        );
+        let prod_root = temp_dir.path().join("prod_bundles");
+        fs::create_dir_all(&prod_root).expect("prod root should be created");
+        let mut cache = BundleCache::new(temp_dir.path().join("cache")).expect("cache should open");
+        let team_config = team_config_with_prod_root(&prod_root);
+
+        let levels = logged_levels(|| {
+            resolve_cached_bundles(vec![original.clone()], Some(&mut cache), Some(&team_config));
+        });
+
+        assert!(
+            levels.contains(&tracing::Level::WARN),
+            "a configured source that is missing is a real failure: {levels:?}"
+        );
+    }
+
+    #[test]
+    fn open_default_bundle_cache_reports_failures_through_tracing() {
+        with_env_lock(|| {
+            let temp_dir = tempdir().expect("tempdir should be created");
+            let blocker = temp_dir.path().join("not_a_directory");
+            fs::write(&blocker, "file").expect("blocker file should write");
+            let unusable = blocker.join("cache");
+            let _guard = EnvVarGuard::set_many(&[
+                (BUNDLE_CACHE_DIR_VAR, Some(unusable.as_os_str())),
+                (BUNDLE_CACHE_DISABLE_VAR, None),
+            ]);
+
+            let mut opened = true;
+            let levels = logged_levels(|| {
+                opened = open_default_bundle_cache(false).is_some();
+            });
+
+            assert!(!opened, "a cache under a regular file cannot open");
+            assert!(levels.contains(&tracing::Level::WARN), "{levels:?}");
+        });
     }
 
     #[test]

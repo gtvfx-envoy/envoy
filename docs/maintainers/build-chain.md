@@ -145,7 +145,10 @@ Runs on the self-hosted Windows runner. In order, it:
    proves the *built wheel* works, not merely that it compiled;
 7. runs `envoy.exe --version` as a smoke test;
 8. packages `envoy-vX.Y.Z-windows-x86_64.zip` with `scripts/package_release.py`
-   and uploads it, plus the wheel, as workflow artifacts.
+   and uploads it, plus the wheel, as workflow artifacts. The script reads the
+   wheel from `dist/` (the same directory it writes to) and unpacks it into the
+   bundle's `py/` directory. It fails if the wheel is missing, so a release
+   cannot silently ship without the Python API.
 
 #### linux-x86_64
 
@@ -238,8 +241,13 @@ A complete Envoy release has exactly nine assets:
 | `SHA256SUMS` | SHA-256 checksum of every other asset. |
 
 Each bundle unpacks to `gt/envoy/vX.Y.Z/` containing `bin/` (the `envoy`
-executable and the `en` alias), `.envoy/`, a `.bundle` marker, the license, and
-the README. The wheel version `0.0.0` is a deliberate placeholder, and
+executable and the `en` alias), `.envoy/`, `py/` (the platform's wheel,
+unpacked), a `.bundle` marker, the license, and the README. `.envoy/python_env.json`
+puts `py/` on `PYTHONPATH`, so `import envoy` works for commands that load the
+bundle without installing the wheel. `scripts/package_release.py` reads the
+wheel for the target from `--wheel-dir` (default: its output directory) and
+ignores wheels built for other platforms; pass `--no-wheel` to package without
+the Python API. The wheel version `0.0.0` is a deliberate placeholder, and
 `cp310-abi3` means one wheel serves CPython 3.10 and newer.
 
 Verify a release after it publishes:

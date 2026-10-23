@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::discovery::identity::bundle_identity;
 use crate::discovery::types::BundleInfo;
-use crate::discovery::util::name_and_namespace;
 
 /// Return `true` if `path` contains a `.git/` directory.
 pub fn is_git_repo(path: &Path) -> bool {
@@ -108,8 +108,8 @@ pub fn discover_bundles_for_root(root: &Path, max_depth: usize) -> Vec<BundleInf
         .into_iter()
         .filter(|candidate_path| validate_bundle(candidate_path))
         .map(|candidate_path| {
-            let (name, namespace) = name_and_namespace(&candidate_path);
-            BundleInfo::new(candidate_path, name, namespace)
+            let identity = bundle_identity(&candidate_path);
+            BundleInfo::new(candidate_path, identity.name, identity.namespace)
         })
         .collect()
 }

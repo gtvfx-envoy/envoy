@@ -21,9 +21,10 @@ mod tests {
     };
     use crate::discovery::discover_bundles_from_roots;
     use crate::discovery::files::{get_bundle_commands_files, get_bundle_env_files};
+    use crate::discovery::identity::{bundle_identity, IdentitySource};
     use crate::discovery::scan::{
-        find_bundle_roots, find_git_repos, has_envoy_env, is_git_repo, is_published_bundle,
-        validate_bundle,
+        discover_bundles_for_root, find_bundle_roots, find_git_repos, has_envoy_env, is_git_repo,
+        is_published_bundle, validate_bundle,
     };
     use crate::discovery::types::{Bundle, BundleInfo};
     use crate::discovery::util::{current_timestamp, infer_namespace};
@@ -581,6 +582,120 @@ mod tests {
         assert_eq!(bundle.version(), "1.2.3");
         assert!(bundle.is_production());
         assert!(!bundle.is_checkout());
+    }
+
+    #[test]
+    fn bundle_identity_reads_the_marker_not_the_version_directory() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let published = create_published_bundle(
+            &temp.path().join("ext").join("python"),
+            "3.11.9-envoy.2",
+            json!({"bndlid": "ext:python", "name": "python", "version": "3.11.9-envoy.2"}),
+            &["python_env.json"],
+            None,
+        );
+
+        let identity = bundle_identity(&published);
+        assert_eq!(identity.bndlid(), "ext:python");
+        assert_eq!(identity.source, IdentitySource::Marker);
+    }
+
+    #[test]
+    fn bundle_identity_gives_a_namespace_less_marker_the_default_namespace() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let markers = [
+            (
+                "both",
+                json!({"bndlid": "globals", "name": "globals", "version": "0.3.0"}),
+            ),
+            ("only_name", json!({"name": "globals", "version": "0.3.0"})),
+            (
+                "only_bare_bndlid",
+                json!({"bndlid": "globals", "version": "0.3.0"}),
+            ),
+        ];
+
+        for (label, marker) in markers {
+            let published = create_published_bundle(
+                &temp.path().join(label).join("globals"),
+                "0.3.0",
+                marker,
+                &[],
+                None,
+            );
+
+            let identity = bundle_identity(&published);
+            assert_eq!(identity.bndlid(), "gt:globals", "{label}");
+            assert_eq!(identity.source, IdentitySource::Marker, "{label}");
+        }
+    }
+
+    #[test]
+    fn bundle_identity_falls_back_to_the_layout_without_a_naming_marker() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let checkout = create_checkout_bundle(temp.path(), "tools", "render", &[], None);
+        let unnamed = create_published_bundle(
+            &temp.path().join("tools"),
+            "v2",
+            json!({"version": "2.0.0"}),
+            &[],
+            None,
+        );
+        let unreadable = temp.path().join("tools").join("broken");
+        fs::create_dir_all(&unreadable).expect("failed to create bundle directory");
+        fs::write(unreadable.join(BUNDLE_MARKER_FILE), "not json").expect("failed to write marker");
+
+        for (root, expected) in [
+            (&checkout, "tools:render"),
+            (&unnamed, "tools:v2"),
+            (&unreadable, "tools:broken"),
+        ] {
+            let identity = bundle_identity(root);
+            assert_eq!(identity.bndlid(), expected);
+            assert_eq!(identity.source, IdentitySource::Layout);
+        }
+    }
+
+    #[test]
+    fn scanning_and_path_construction_agree_on_a_published_identity() {
+        let temp = tempdir().expect("failed to create temp dir");
+        let published = create_published_bundle(
+            &temp.path().join("releases").join("render"),
+            "v1.2.3",
+            json!({"bndlid": "tools:render", "version": "1.2.3"}),
+            &["render_env.json"],
+            None,
+        );
+
+        let scanned = discover_bundles_for_root(temp.path(), 5);
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].bndlid(), "tools:render");
+
+        let by_path = Bundle::new(&published, None).expect("published bundle path should be valid");
+        assert_eq!(by_path.bndlid(), "tools:render");
+        assert_eq!(by_path.name(), "render");
+    }
+
+    #[test]
+    fn bundle_new_from_a_bndlid_keeps_that_id_for_a_published_bundle() {
+        with_env_lock(|| {
+            let temp = tempdir().expect("failed to create temp dir");
+            let published = create_published_bundle(
+                &temp.path().join("releases"),
+                "v1.2.3",
+                json!({"bndlid": "tools:render", "version": "1.2.3"}),
+                &["render_env.json"],
+                None,
+            );
+            let roots = join_roots(&[temp.path()]);
+            let _roots_guard = EnvVarGuard::set(BUNDLE_ROOTS_VAR, Some(roots.as_os_str()));
+            let _cache_guard = EnvVarGuard::set(DISCOVERY_CACHE_DISABLE_VAR, Some(OsStr::new("1")));
+
+            let bundle = Bundle::new("tools:render", None).expect("bundle ID should resolve");
+            assert_eq!(bundle.bndlid(), "tools:render");
+            assert_eq!(bundle.name(), "render");
+            assert_same_path(bundle.path(), &published);
+        });
     }
 
     #[test]
