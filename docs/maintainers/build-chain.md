@@ -226,7 +226,7 @@ runs show `startup_failure` and the downstream assessment never happens.
 
 ### Release artifacts
 
-A complete Envoy release has exactly nine assets:
+A complete Envoy release has exactly thirteen assets:
 
 | Asset | What it is |
 |---|---|
@@ -238,6 +238,10 @@ A complete Envoy release has exactly nine assets:
 | `envoy-0.0.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl` | Python wheel for Linux. |
 | `envoy-0.0.0-cp310-abi3-macosx_10_12_x86_64.whl` | Python wheel for macOS Intel. |
 | `envoy-0.0.0-cp310-abi3-macosx_11_0_arm64.whl` | Python wheel for macOS Apple silicon. |
+| `envoy-shim-vX.Y.Z-windows-x86_64.zip` | [Launcher](../launcher.md) for Windows, with its install and verify scripts. |
+| `envoy-shim-vX.Y.Z-linux-x86_64-musl.tar.gz` | Static launcher for Linux. |
+| `envoy-shim-vX.Y.Z-macos-x86_64.tar.gz` | Launcher for macOS Intel. |
+| `envoy-shim-vX.Y.Z-macos-aarch64.tar.gz` | Launcher for macOS Apple silicon. |
 | `SHA256SUMS` | SHA-256 checksum of every other asset. |
 
 Each bundle unpacks to `gt/envoy/vX.Y.Z/` containing `bin/` (the `envoy`
@@ -250,15 +254,24 @@ ignores wheels built for other platforms; pass `--no-wheel` to package without
 the Python API. The wheel version `0.0.0` is a deliberate placeholder, and
 `cp310-abi3` means one wheel serves CPython 3.10 and newer.
 
+Each launcher archive is flat, with no top-level folder: the `envoy` executable
+and its `en` alias (a link on Linux and macOS), the install and uninstall scripts
+(plus `verify-launcher.ps1` on Windows), and the license. Whoever publishes it
+unpacks it into `shim/<version>/<target>/` on the team share, as described in
+[Team Administration](../team-administration.md). `scripts/package_shim.py`
+builds it from the `envoy-shim` binary that the same native build produces.
+
 Verify a release after it publishes:
 
 ```powershell
 gh release view vX.Y.Z --repo gtvfx-envoy/envoy --json assets --jq '.assets[].name'
 ```
 
-You should see all nine names. Despatch's installer requires exactly one wheel
+You should see all thirteen names. Despatch's installer requires exactly one wheel
 for its platform, one platform archive, and `SHA256SUMS`, so a missing asset
-shows up there as `Expected one ... found 0`.
+shows up there as `Expected one ... found 0`. It picks its archive by exact name
+(`envoy-vX.Y.Z-<platform>`), so the launcher archives, whose names start with
+`envoy-shim-`, never match it.
 
 ### Versions: where they live and what must agree
 
