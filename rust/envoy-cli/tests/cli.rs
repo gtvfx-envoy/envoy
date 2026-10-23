@@ -54,12 +54,20 @@ fn base_command() -> Command {
         .env_remove("ENVOY_TELEMETRY_ENABLED")
         .env_remove("ENVOY_TELEMETRY_ENDPOINT")
         .env_remove("ENVOY_TELEMETRY_REDACT_ARGS")
+        .env_remove("ENVOY_CACHE_ROOT")
+        .env_remove("ENVOY_CACHE_MAX_IDLE_DAYS")
+        .env_remove("ENVOY_CACHE_MAX_SIZE")
+        .env_remove("ENVOY_BUNDLE_CACHE")
+        .env_remove("ENVOY_DISABLE_BUNDLE_CACHE")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_HEADERS")
         .env_remove("OTEL_EXPORTER_OTLP_TIMEOUT")
         .env_remove("OTEL_SERVICE_NAME")
-        .env_remove("OTEL_RESOURCE_ATTRIBUTES");
+        .env_remove("OTEL_RESOURCE_ATTRIBUTES")
+        // Caching is off unless a test turns it on with a root of its own, so no
+        // test writes to the real home directory.
+        .env("ENVOY_CACHE", "off");
     command
 }
 
@@ -459,78 +467,446 @@ fn command_info_reports_target_and_platform_resolution() {
     );
 }
 
-/// End-to-end coverage for the Phase 1-3 wiring gaps closed in this pass:
-/// a *published* bundle whose `.envoy/team.json` and `.envoy/commands.json`
-/// come from a warm bundle-cache entry, all selected through a strict stack
-/// resolved automatically through the real `envoy` binary -- not just via
-/// direct, isolated unit calls to each module.
-#[test]
-fn verbose_run_resolves_stack_team_config_and_warm_bundle_cache_together() {
-    let scratch = ScratchDir::new("envoy_full_wiring");
-
-    // A published bundle (has a `.bundle` marker) discovered via
-    // ENVOY_BNDL_ROOTS. Its own commands.json defines a command that should
-    // NOT end up loaded, because a cached snapshot takes precedence.
-    let bundle_root = scratch.path().join("gt").join("maya");
-    let envoy_dir = bundle_root.join(".envoy");
+/// Writes a published bundle whose `show` command prints the bundle root it was
+/// loaded from, so a test can tell the share from the cache.
+///
+/// The command is a script shipped inside the bundle, which also proves that the
+/// cached copy keeps it runnable.
+fn write_published_tool(root: &Path, name: &str, version: &str) {
+    let envoy_dir = root.join(".envoy");
     fs::create_dir_all(&envoy_dir).expect(".envoy dir should be created");
-    fs::write(bundle_root.join(".bundle"), r#"{"version": "2.0.0"}"#)
-        .expect(".bundle marker should be written");
+    fs::write(
+        root.join(".bundle"),
+        format!(r#"{{"bndlid": "gt:{name}", "name": "{name}", "version": "{version}"}}"#),
+    )
+    .expect(".bundle marker should be written");
+
+    let script = if cfg!(windows) { "show.bat" } else { "show.sh" };
+    let body = if cfg!(windows) {
+        "@echo %SHOWN_ROOT%\r\n"
+    } else {
+        "#!/bin/sh\necho \"$SHOWN_ROOT\"\n"
+    };
+    fs::write(root.join(script), body).expect("script should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root.join(script), fs::Permissions::from_mode(0o755))
+            .expect("script should be executable");
+    }
+
     fs::write(
         envoy_dir.join("commands.json"),
-        r#"{"from_checkout_root": {"environment": []}}"#,
+        format!(
+            r#"{{"show": {{"environment": ["show_env.json"], "alias": ["${{__BUNDLE__}}/{script}"]}}}}"#
+        ),
     )
-    .expect("original commands.json should be written");
-
-    // The cached snapshot: a *different* commands.json (so we can prove it
-    // -- not the original bundle root -- is what actually gets loaded), plus
-    // the team.json that should be auto-resolved.
-    let cached_source = scratch.path().join("cached_source");
-    let cached_envoy_dir = cached_source.join(".envoy");
-    fs::create_dir_all(&cached_envoy_dir).expect("cached .envoy dir should be created");
+    .expect("commands.json should be written");
     fs::write(
-        cached_envoy_dir.join("commands.json"),
-        r#"{"known_from_cache": {"environment": []}}"#,
+        envoy_dir.join("show_env.json"),
+        r#"{"SHOWN_ROOT": "${__BUNDLE__}"}"#,
     )
-    .expect("cached commands.json should be written");
-    fs::write(cached_envoy_dir.join("team.json"), r#"{"name": "bfd"}"#)
-        .expect("cached team.json should be written");
-    let stack_path = scratch.path().join("studio.estack");
-    write_stack(&stack_path, "bfd", &bundle_root);
+    .expect("show_env.json should be written");
+}
 
-    let cache_root = scratch.path().join("bundle_cache");
-    let mut cache = BundleCache::new(&cache_root).expect("bundle cache should open");
-    cache
-        .store("gt:maya", "1.0.0", &cached_source)
-        .expect("storing the cached snapshot should succeed");
+/// Writes a published bundle that does nothing for the `show` command.
+fn write_published_extra(root: &Path, name: &str, version: &str) {
+    fs::create_dir_all(root.join(".envoy")).expect(".envoy dir should be created");
+    fs::write(
+        root.join(".bundle"),
+        format!(r#"{{"bndlid": "gt:{name}", "name": "{name}", "version": "{version}"}}"#),
+    )
+    .expect(".bundle marker should be written");
+    fs::write(root.join(".envoy").join("other_env.json"), "{}")
+        .expect("other_env.json should be written");
+}
+
+fn write_stack_of(path: &Path, bundles: &[&Path]) {
+    let entries: String = bundles
+        .iter()
+        .map(|bundle| {
+            format!(
+                "  - path: '{}'\n",
+                bundle.to_string_lossy().replace('\'', "''")
+            )
+        })
+        .collect();
+    fs::write(path, format!("namespace: gt\nbundles:\n{entries}"))
+        .expect("stack should be written");
+}
+
+/// A stack of two published bundles: `tool` (which `show` uses) and `extra`.
+fn published_studio(scratch: &ScratchDir) -> (PathBuf, PathBuf, PathBuf) {
+    let tool = scratch.path().join("share").join("tool").join("1.0.0");
+    let extra = scratch.path().join("share").join("extra").join("2.0.0");
+    write_published_tool(&tool, "tool", "1.0.0");
+    write_published_extra(&extra, "extra", "2.0.0");
+    let stack = scratch.path().join("studio.estack");
+    write_stack_of(&stack, &[&tool, &extra]);
+    (stack, tool, extra)
+}
+
+#[test]
+fn listing_commands_never_copies_a_bundle() {
+    let scratch = ScratchDir::new("envoy_list_does_not_cache");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    base_command()
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--list")
+        .env("ENVOY_CACHE", "on")
+        .env("ENVOY_CACHE_ROOT", &cache_root)
+        .assert()
+        .success();
+
+    assert!(
+        !cache_root.exists(),
+        "--list must not create or fill the cache"
+    );
+}
+
+/// Whether the directory `show` printed is `expected`, however either is spelled.
+///
+/// A temp directory may be written with short names that envoy prints in full,
+/// so both sides are canonicalized before they are compared.
+fn ran_from(assert: &assert_cmd::assert::Assert, expected: &Path) -> bool {
+    let printed = stdout_text(assert);
+    match (fs::canonicalize(printed.trim()), fs::canonicalize(expected)) {
+        (Ok(printed), Ok(expected)) => printed == expected,
+        _ => false,
+    }
+}
+
+#[test]
+fn a_command_runs_from_a_cached_copy_of_only_the_bundles_it_uses() {
+    let scratch = ScratchDir::new("envoy_run_caches_used_bundles");
+    let (stack, tool, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = || {
+        base_command()
+            .arg("--stack")
+            .arg(&stack)
+            .arg("show")
+            .env("ENVOY_CACHE", "on")
+            .env("ENVOY_CACHE_ROOT", &cache_root)
+            .assert()
+            .success()
+    };
+
+    let first = run();
+    let shown = stdout_text(&first);
+    assert!(
+        shown.contains(&cache_root.display().to_string()),
+        "the command should run from the cache, stdout was:\n{shown}"
+    );
+    assert!(!ran_from(&first, &tool), "stdout was:\n{shown}");
+    assert!(stderr_text(&first).contains("caching gt:tool@1.0.0"));
+    assert!(cache_root.join("bundles/gt/tool/1.0.0/.envoy").is_dir());
+    assert!(
+        !cache_root.join("bundles/gt/extra").exists(),
+        "a bundle the command does not use is not worth copying"
+    );
+
+    let second = run();
+    assert!(
+        !stderr_text(&second).contains("caching"),
+        "the second run reuses the copy, stderr was:\n{}",
+        stderr_text(&second)
+    );
+    assert!(stdout_text(&second).contains(&cache_root.display().to_string()));
+}
+
+#[test]
+fn caching_can_be_switched_off() {
+    let scratch = ScratchDir::new("envoy_cache_off");
+    let (stack, tool, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
 
     let assert = base_command()
-        .args(["--verbose", "--stack"])
-        .arg(&stack_path)
-        .arg("--list")
-        .env("ENVOY_BUNDLE_CACHE", &cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .env("ENVOY_CACHE_ROOT", &cache_root)
+        .env("ENVOY_CACHE", "off")
+        .assert()
+        .success();
+
+    assert!(
+        ran_from(&assert, &tool),
+        "stdout was:\n{}",
+        stdout_text(&assert)
+    );
+    assert!(
+        !cache_root.exists(),
+        "an off switch must not create the cache"
+    );
+}
+
+#[test]
+fn an_unusable_cache_falls_back_to_the_share_with_one_warning() {
+    let scratch = ScratchDir::new("envoy_cache_unusable");
+    let (stack, tool, _) = published_studio(&scratch);
+    let blocker = scratch.path().join("a-file");
+    fs::write(&blocker, "not a directory").expect("blocker should be written");
+
+    let assert = base_command()
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .env("ENVOY_CACHE", "on")
+        .env("ENVOY_CACHE_ROOT", blocker.join("cache"))
+        .assert()
+        .success();
+
+    assert!(
+        ran_from(&assert, &tool),
+        "the command should still run, from the share; stdout was:\n{}",
+        stdout_text(&assert)
+    );
+    let stderr = stderr_text(&assert);
+    assert_eq!(
+        stderr.matches("Bundle caching is unavailable").count(),
+        1,
+        "stderr was:\n{stderr}"
+    );
+}
+
+/// `envoy` with caching on and the cache in `root`.
+fn caching_command(root: &Path) -> Command {
+    let mut command = base_command();
+    command
+        .env("ENVOY_CACHE", "on")
+        .env("ENVOY_CACHE_ROOT", root);
+    command
+}
+
+#[test]
+fn cache_actions_report_and_clean_up_without_a_stack() {
+    let scratch = ScratchDir::new("envoy_cache_actions");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let status = caching_command(&cache_root)
+        .args(["cache", "status"])
+        .assert()
+        .success();
+    let stdout = stdout_text(&status);
+    assert!(stdout.contains(&cache_root.display().to_string()));
+    assert!(stdout.contains("none (the cache has not been created yet)"));
+    assert!(!cache_root.exists(), "status must not create the cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    let status = caching_command(&cache_root)
+        .args(["cache", "status"])
+        .assert()
+        .success();
+    assert!(stdout_text(&status).contains("Entries: 1 ("));
+
+    let list = caching_command(&cache_root)
+        .args(["cache", "list"])
+        .assert()
+        .success();
+    assert!(stdout_text(&list).contains("gt:tool@1.0.0"));
+
+    let verify = caching_command(&cache_root)
+        .args(["cache", "verify"])
+        .assert()
+        .success();
+    assert!(stdout_text(&verify).contains("ok       gt:tool@1.0.0"));
+
+    let cached_file = cache_root.join("bundles/gt/tool/1.0.0/.envoy/show_env.json");
+    fs::remove_file(&cached_file).expect("a cached file should be removable");
+    let damaged = caching_command(&cache_root)
+        .args(["cache", "verify"])
+        .assert()
+        .code(1);
+    assert!(stdout_text(&damaged).contains("DAMAGED  gt:tool@1.0.0"));
+
+    let dry_run = caching_command(&cache_root)
+        .args(["cache", "clear", "--dry-run"])
+        .assert()
+        .success();
+    assert!(stdout_text(&dry_run).contains("Would remove 1 entry"));
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+
+    let clear = caching_command(&cache_root)
+        .args(["cache", "clear"])
+        .assert()
+        .success();
+    assert!(stdout_text(&clear).contains("Removed 1 entry"));
+    assert!(!cache_root.join("bundles/gt/tool/1.0.0").exists());
+}
+
+#[test]
+fn cache_is_only_the_cache_command_when_an_action_follows() {
+    let scratch = ScratchDir::new("envoy_cache_word");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["cache", "bogus"])
+        .assert()
+        .code(1);
+
+    assert!(stderr_text(&assert).contains("Command 'cache' not found"));
+}
+
+#[test]
+fn noop_warms_the_whole_stack_and_runs_nothing() {
+    let scratch = ScratchDir::new("envoy_noop_stack");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--noop")
         .assert()
         .success();
 
     let stdout = stdout_text(&assert);
-    let stderr = stderr_text(&assert);
+    assert!(stdout.contains("Copied 2 bundles"), "stdout was:\n{stdout}");
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+    assert!(
+        cache_root.join("bundles/gt/extra/2.0.0").is_dir(),
+        "a bundle no command needs is still warmed when none is named"
+    );
 
+    let again = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["cache", "warm"])
+        .assert()
+        .success();
+    assert!(stdout_text(&again).contains("Copied 0 bundles"));
+    assert!(stdout_text(&again).contains("2 already cached"));
+}
+
+#[test]
+fn noop_with_a_command_warms_only_what_it_needs() {
+    let scratch = ScratchDir::new("envoy_noop_command");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["--noop", "show"])
+        .assert()
+        .success();
+
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
+    assert!(!cache_root.join("bundles/gt/extra").exists());
+
+    let missing = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .args(["--noop", "nothing-like-it"])
+        .assert()
+        .code(1);
+    assert!(stderr_text(&missing).contains("Command 'nothing-like-it' not found"));
+}
+
+#[test]
+fn noop_says_so_when_caching_is_off() {
+    let scratch = ScratchDir::new("envoy_noop_off");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = base_command()
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--noop")
+        .env("ENVOY_CACHE_ROOT", &cache_root)
+        .assert()
+        .success();
+
+    assert!(stdout_text(&assert).contains("Caching is off"));
+    assert!(!cache_root.exists());
+}
+
+#[test]
+fn flags_override_the_environment_for_one_run() {
+    let scratch = ScratchDir::new("envoy_cache_flags");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("flagged");
+
+    // The base command sets ENVOY_CACHE=off, so --cache on has to beat it.
+    base_command()
+        .args(["--cache", "on", "--no-prune", "--cache-root"])
+        .arg(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    assert!(cache_root.join("bundles/gt/tool/1.0.0").is_dir());
     assert!(
-        stdout.contains("known_from_cache"),
-        "expected the warm cache's commands to be loaded, stdout was:\n{stdout}"
+        !cache_root.join("last-prune").exists(),
+        "--no-prune must leave the background prune alone"
     );
+
+    let pruning_root = scratch.path().join("pruning");
+    caching_command(&pruning_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+    assert!(pruning_root.join("last-prune").is_file());
+
+    let bad = base_command()
+        .args(["--cache", "maybe", "show"])
+        .assert()
+        .code(1);
+    assert!(stderr_text(&bad).contains("--cache takes 'on' or 'off', not 'maybe'"));
+}
+
+#[test]
+fn diagnose_shows_how_each_bundle_stands_with_the_cache() {
+    let scratch = ScratchDir::new("envoy_diagnose_standing");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+
+    let before = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--diagnose")
+        .assert()
+        .success();
+    let stdout = stdout_text(&before);
+    assert!(stdout.contains("[not cached yet]"), "stdout was:\n{stdout}");
+    assert!(!cache_root.exists(), "diagnosing must not create the cache");
+
+    caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    let after = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("--diagnose")
+        .assert()
+        .success();
+    let stdout = stdout_text(&after);
+    assert!(stdout.contains("[cached]"), "stdout was:\n{stdout}");
     assert!(
-        !stdout.contains("from_checkout_root"),
-        "the original bundle's commands should be shadowed once the cache is \
-warm, stdout was:\n{stdout}"
-    );
-    assert!(
-        stderr.contains("debug: Resolved team config: bfd"),
-        "stderr was:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("debug: Resolved stack: studio"),
-        "stderr was:\n{stderr}"
+        stdout.contains("[not cached yet]"),
+        "the bundle `show` does not use is still waiting:\n{stdout}"
     );
 }
 

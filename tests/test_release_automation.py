@@ -78,3 +78,61 @@ def testReplaceUtilsDependencyUsesLocalEnvoyCore(tmp_path):
     release_automation.replaceUtilsDependency(manifest_path, envoy_root)
     assert 'envoy-core = { path = "' in manifest_path.read_text(encoding="utf-8")
     assert "tag =" not in manifest_path.read_text(encoding="utf-8")
+
+
+def writeWorkspace(root: Path, versions: dict[str, str], manifest_version: str = "0.7.0") -> None:
+    """Write a minimal Cargo workspace manifest and lockfile."""
+    (root / "rust").mkdir()
+    (root / "rust" / "Cargo.toml").write_text(
+        f'[workspace.package]\nversion = "{manifest_version}"\n',
+        encoding="utf-8",
+    )
+    blocks = "".join(
+        f'[[package]]\nname = "{name}"\nversion = "{version}"\n\n'
+        for name, version in versions.items()
+    )
+    (root / "rust" / "Cargo.lock").write_text(blocks, encoding="utf-8")
+
+
+WORKSPACE_VERSIONS = {name: "0.7.0" for name in sorted(release_automation.WORKSPACE_PACKAGE_NAMES)}
+
+
+def testCheckReleaseCoversEveryWorkspaceCrate(tmp_path):
+    """A crate left behind at another version blocks the release, including the store."""
+    assert "envoy-store" in release_automation.WORKSPACE_PACKAGE_NAMES
+    writeWorkspace(tmp_path, WORKSPACE_VERSIONS)
+    assert release_automation.checkRelease(tmp_path, "0.7.0") == "0.7.0"
+
+    stale_root = tmp_path / "stale"
+    stale_root.mkdir()
+    writeWorkspace(stale_root, {**WORKSPACE_VERSIONS, "envoy-store": "0.6.2"})
+    with pytest.raises(RuntimeError, match="envoy-store"):
+        release_automation.checkRelease(stale_root, "0.7.0")
+
+    missing_root = tmp_path / "missing"
+    missing_root.mkdir()
+    writeWorkspace(
+        missing_root,
+        {name: version for name, version in WORKSPACE_VERSIONS.items() if name != "envoy-store"},
+    )
+    with pytest.raises(RuntimeError, match="missing workspace packages"):
+        release_automation.checkRelease(missing_root, "0.7.0")
+
+
+@pytest.mark.parametrize(
+    ("changed", "relevant"),
+    [
+        (["rust/envoy-core/src/runtime.rs"], True),
+        (["rust/envoy-core/Cargo.toml"], True),
+        (["rust/envoy-store/src/store.rs"], True),
+        (["rust/envoy-store/Cargo.toml"], True),
+        (["rust/envoy-cli/src/app.rs", "docs/concepts.md"], False),
+        (["rust/envoy-store/tests/extra.rs"], False),
+    ],
+)
+def testClassifyImpactWatchesTheCratesEnvoyUtilsBuilds(tmp_path, changed, relevant):
+    """Envoy Utils builds envoy-core and, through it, envoy-store."""
+    with mock.patch.object(release_automation, "changedFiles", return_value=changed):
+        result = release_automation.classifyImpact(tmp_path, "base", "head")
+    assert result["relevant"] is relevant
+    assert result["classification"] == ("review" if relevant else "none")

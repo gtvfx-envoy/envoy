@@ -13,7 +13,7 @@ Bundles come in two forms:
 | **Checkout** | `.git/` directory | `'checkout'` | `False` |
 | **Published** | `.bundle` file | e.g. `'v1.2.0'` | `True` |
 
-Published bundles are also checked against the local [bundle cache](concepts.md#bundle-cache): if a cached snapshot exists for a published bundle's `namespace:name`, envoy uses the cached copy instead of re-reading it from its original (possibly remote) location. Checkout bundles are never substituted this way — your own working copy is never silently swapped for a cached snapshot.
+The published bundles a command uses are copied to a local [cache](caching.md) the first time they are needed, so later runs read from local disk instead of the network. Checkout bundles are never cached — your own working copy always runs from where it is. The Python API follows the same rule: `envoy.getEnvironment(...)` and `envoy.proc.Environment(...)` run from the cache, while `traceEnvironment` and `diagnoseEnvironment` only look and copy nothing.
 
 ## Discovery Flow
 

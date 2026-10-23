@@ -1,0 +1,21 @@
+[package]
+name = "envoy-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Name-addressed local store for published envoy bundles: atomic fills, in-use leases, and retention."
+
+[lib]
+name = "envoy_store"
+
+[dependencies]
+fs4 = { version = "1", features = ["sync"] }
+rayon = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

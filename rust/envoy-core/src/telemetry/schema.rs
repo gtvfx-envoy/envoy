@@ -103,6 +103,8 @@ pub enum CommandKind {
     SetStack,
     GetStack,
     ListStacks,
+    Cache,
+    Noop,
     Help,
     ResolutionFailure,
 }
@@ -125,6 +127,8 @@ impl CommandKind {
             CommandKind::SetStack => "set_stack",
             CommandKind::GetStack => "get_stack",
             CommandKind::ListStacks => "list_stacks",
+            CommandKind::Cache => "cache",
+            CommandKind::Noop => "noop",
             CommandKind::Help => "help",
             CommandKind::ResolutionFailure => "resolution_failure",
         }

@@ -30,11 +30,11 @@ use crate::exceptions::{
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-use envoy_core::bundle_cache::open_default_bundle_cache;
+use envoy_core::bundle_store::load_registry_for_run;
 use envoy_core::commands::CommandDefinition;
 use envoy_core::environment::EnvironmentManager;
 use envoy_core::executor::ProcessExecutor;
-use envoy_core::runtime::{is_raw_path, load_registry, prepare_env, resolve_envoy_exe};
+use envoy_core::runtime::{is_raw_path, prepare_env, resolve_envoy_exe};
 use pyo3::exceptions::{PyOSError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule, PyString};
@@ -787,12 +787,9 @@ fn build_cached_environment(
         });
     }
 
-    let (registry, bundles) = load_registry(
-        bundle_roots,
-        commands_file,
-        open_default_bundle_cache(true).as_ref(),
-    )
-    .map_err(envoy_error_to_pyerr)?;
+    let (registry, bundles) =
+        load_registry_for_run(bundle_roots, commands_file, command, env_override)
+            .map_err(envoy_error_to_pyerr)?;
     let (env, command_definition) = prepare_env(
         command,
         &registry,

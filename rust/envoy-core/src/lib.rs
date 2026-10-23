@@ -22,6 +22,7 @@
 //! | [`wrapper`]          | `_wrapper.py`            |
 
 pub mod bundle_cache;
+pub mod bundle_store;
 pub mod commands;
 pub mod config_crypto;
 pub mod discovery;

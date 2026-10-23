@@ -12,9 +12,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::exceptions::envoy_error_to_pyerr;
-use envoy_core::bundle_cache::{
-    open_default_bundle_cache, BundleCache as CoreBundleCache, BundleCacheError,
-};
+use envoy_core::bundle_cache::{BundleCache as CoreBundleCache, BundleCacheError};
+use envoy_core::bundle_store::load_registry_for_run;
 use envoy_core::discovery::{
     discover_bundles_auto as core_discover_bundles_auto, get_bundles as core_get_bundles,
     load_bundles_from_stack as core_load_bundles_from_stack, Bundle as CoreBundle,
@@ -521,6 +520,11 @@ impl Stack {
 }
 
 /// Build and return the subprocess environment dict for `command`.
+///
+/// The environment is for running the command, so the published bundles it
+/// needs are copied into the local bundle cache on first use and the
+/// environment points at the copies, as `envoy COMMAND` does. Set
+/// `ENVOY_CACHE=off` to read bundles where they are instead.
 #[pyfunction(name = "getEnvironment")]
 #[pyo3(signature = (command, *, inherit_env=false, allowlist=None, bundle_roots=None, commands_file=None))]
 fn get_environment(
@@ -538,10 +542,13 @@ fn get_environment(
     }
 
     let commands_file = resolve_optional_path(commands_file)?;
-    let (registry, bundles) = load_registry(
+    // The environment is for running, so the bundles it needs come from the
+    // local store, as they do for `envoy COMMAND`.
+    let (registry, bundles) = load_registry_for_run(
         bundle_roots.as_deref(),
         commands_file.as_deref(),
-        open_default_bundle_cache(true).as_ref(),
+        command,
+        None,
     )
     .map_err(envoy_error_to_pyerr)?;
     let (env, _) = prepare_env(
@@ -568,6 +575,9 @@ fn get_allowlist(py: Python<'_>, extra: Option<Vec<String>>) -> PyResult<PyObjec
 }
 
 /// Build the environment for `command` and return a trace of how `var` mutated.
+///
+/// Tracing only looks, so bundles are read where they are and nothing is
+/// copied into the bundle cache.
 #[pyfunction(name = "traceEnvironment")]
 #[pyo3(signature = (command, var, *, inherit_env=false, allowlist=None, bundle_roots=None, commands_file=None))]
 fn trace_environment(
@@ -589,12 +599,10 @@ fn trace_environment(
             .map_err(envoy_error_to_pyerr)?
     } else {
         let commands_file = resolve_optional_path(commands_file)?;
-        let (registry, bundles) = load_registry(
-            bundle_roots.as_deref(),
-            commands_file.as_deref(),
-            open_default_bundle_cache(true).as_ref(),
-        )
-        .map_err(envoy_error_to_pyerr)?;
+        // Tracing only looks, so bundles are read where they are.
+        let (registry, bundles) =
+            load_registry(bundle_roots.as_deref(), commands_file.as_deref(), None)
+                .map_err(envoy_error_to_pyerr)?;
         let env_files = collect_env_files(command, &registry, bundles.as_deref())
             .map_err(envoy_error_to_pyerr)?;
         env_manager
@@ -616,7 +624,8 @@ fn trace_environment(
 /// Unlike [`trace_environment`](trace_environment), which traces a single
 /// variable, this walks **all** entries in all env files and returns one
 /// trace event per entry plus allowlist pre-pass events. Suitable for
-/// diagnostic / debugging output.
+/// diagnostic / debugging output. Like tracing, it reads bundles where they
+/// are and copies nothing into the bundle cache.
 #[pyfunction(name = "diagnoseEnvironment")]
 #[pyo3(signature = (command, *, inherit_env=false, allowlist=None, bundle_roots=None, commands_file=None))]
 fn diagnose_environment(
@@ -636,12 +645,10 @@ fn diagnose_environment(
             .map_err(envoy_error_to_pyerr)?
     } else {
         let commands_file = resolve_optional_path(commands_file)?;
-        let (registry, bundles) = load_registry(
-            bundle_roots.as_deref(),
-            commands_file.as_deref(),
-            open_default_bundle_cache(true).as_ref(),
-        )
-        .map_err(envoy_error_to_pyerr)?;
+        // Diagnosing only looks, so bundles are read where they are.
+        let (registry, bundles) =
+            load_registry(bundle_roots.as_deref(), commands_file.as_deref(), None)
+                .map_err(envoy_error_to_pyerr)?;
         let env_files = collect_env_files(command, &registry, bundles.as_deref())
             .map_err(envoy_error_to_pyerr)?;
         env_manager
@@ -706,12 +713,9 @@ fn get_current_team_config(
     commands_file: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Option<Py<TeamConfig>>> {
     let commands_file = resolve_optional_path(commands_file)?;
-    let (_registry, bundles) = load_registry(
-        bundle_roots.as_deref(),
-        commands_file.as_deref(),
-        open_default_bundle_cache(true).as_ref(),
-    )
-    .map_err(envoy_error_to_pyerr)?;
+    let (_registry, bundles) =
+        load_registry(bundle_roots.as_deref(), commands_file.as_deref(), None)
+            .map_err(envoy_error_to_pyerr)?;
 
     resolve_team_config_for_bundles(bundles.as_deref())
         .map(|inner| Py::new(py, TeamConfig { inner }))

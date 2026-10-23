@@ -558,6 +558,7 @@ dependencies = [
  "age",
  "base64 0.22.1",
  "ctrlc",
+ "envoy-store",
  "fs4",
  "hex",
  "json_comments",
@@ -585,6 +586,19 @@ dependencies = [
  "envoy-core",
  "pyo3",
  "serde_json",
+]
+
+[[package]]
+name = "envoy-store"
+version = "0.7.0"
+dependencies = [
+ "fs4",
+ "rayon",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
 ]
 
 [[package]]

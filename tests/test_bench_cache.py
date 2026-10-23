@@ -46,10 +46,13 @@ def testCountWarningsIgnoresColourCodesAndOtherLevels():
     assert bench_cache.countWarnings(stderr) == 2
 
 
-def testRunTimesOneColdRunAndSeveralWarmRuns():
+def testRunTimesOneColdRunAndSeveralWarmRuns(tmp_path):
     """A stand-in executable is timed once cold and ``--runs`` times warm."""
     options = bench_cache.parseArguments(
-        ["run", "--envoy", sys.executable, "--runs", "2", "--", "-c", "print(1)"]
+        [
+            *["run", "--envoy", sys.executable, "--runs", "2"],
+            *["--cache-root", str(tmp_path / "cache"), "--", "-c", "print(1)"],
+        ]
     )
 
     summary = bench_cache.runBenchmark(options)
@@ -58,3 +61,24 @@ def testRunTimesOneColdRunAndSeveralWarmRuns():
     assert summary["exit_codes"] == [0, 0, 0]
     assert summary["warnings_per_run"] == 0
     assert summary["cold_ms"] >= 0
+
+
+def testDefaultCacheRootIsShortAndRemovedAfterTheRun(tmp_path, monkeypatch):
+    """Without ``--cache-root`` the root sits beside the default one and does not linger."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    seen = tmp_path / "seen.txt"
+    probe = (
+        "import os, pathlib; "
+        f"pathlib.Path({str(seen)!r}).write_text(os.environ['ENVOY_CACHE_ROOT'])"
+    )
+    options = bench_cache.parseArguments(
+        ["run", "--envoy", sys.executable, "--runs", "0", "--", "-c", probe]
+    )
+
+    bench_cache.runBenchmark(options)
+
+    root = Path(seen.read_text(encoding="utf-8"))
+    assert root.parent == tmp_path / ".envoy"
+    assert len(root.name) <= 10
+    assert not root.exists()
