@@ -679,6 +679,277 @@ fn an_unusable_cache_falls_back_to_the_share_with_one_warning() {
     );
 }
 
+/// A stack of two published bundles, `tool` (which `show` uses) and `extra`,
+/// that lives, with the stack itself, on a "share" the test can take away.
+/// Returns the share and the stack file.
+fn studio_on_a_share(scratch: &ScratchDir) -> (PathBuf, PathBuf) {
+    let share = scratch.path().join("share");
+    let tool = share.join("bndl").join("tool").join("1.0.0");
+    write_published_tool(&tool, "tool", "1.0.0");
+    let extra = share.join("bndl").join("extra").join("2.0.0");
+    write_published_extra(&extra, "extra", "2.0.0");
+    let stack = share
+        .join("stacks")
+        .join("studio")
+        .join("2026-09-27")
+        .join("studio.estack");
+    fs::create_dir_all(stack.parent().expect("stack has a folder"))
+        .expect("stack folder should be created");
+    write_stack_of(&stack, &[&tool, &extra]);
+    (share, stack)
+}
+
+#[test]
+fn a_stack_that_has_run_starts_again_when_its_share_is_gone() {
+    let scratch = ScratchDir::new("envoy_stack_offline");
+    let (share, stack) = studio_on_a_share(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = |args: &[&str]| {
+        let mut command = caching_command(&cache_root);
+        command.arg("--stack").arg(&stack).args(args);
+        command.assert()
+    };
+
+    run(&["--list"]).success();
+    assert!(
+        !cache_root.exists(),
+        "looking at a stack does not remember it"
+    );
+    run(&["show"]).success();
+    assert!(
+        fs::read_dir(cache_root.join("snapshots").join("stacks"))
+            .expect("the stack was remembered")
+            .count()
+            >= 1
+    );
+
+    fs::remove_dir_all(&share).expect("the share should be removed");
+
+    let offline = run(&["show"]).success();
+    let shown = stdout_text(&offline);
+    assert!(
+        shown.contains(&cache_root.display().to_string()),
+        "the command should run from the cache, stdout was:\n{shown}"
+    );
+    let stderr = stderr_text(&offline);
+    assert!(
+        stderr.contains("cannot be reached; using stack 'studio'"),
+        "stderr was:\n{stderr}"
+    );
+
+    let listed = run(&["--list"]).success();
+    assert!(stdout_text(&listed).contains("show"));
+    let diagnosed = run(&["--diagnose"]).success();
+    assert!(stdout_text(&diagnosed).contains("from a snapshot"));
+
+    // Only a stack that cannot be reached is replaced by its memory.
+    let without_a_cache = base_command()
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .failure();
+    assert!(stderr_text(&without_a_cache).contains("Stack path does not exist"));
+    caching_command(&cache_root)
+        .arg("--set-stack")
+        .arg(&stack)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn a_named_stack_starts_again_when_its_stack_root_is_gone() {
+    let scratch = ScratchDir::new("envoy_named_stack_offline");
+    let (share, _) = studio_on_a_share(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let roots = share.join("stacks");
+    let run = |name: &str| {
+        let mut command = caching_command(&cache_root);
+        command
+            .env("ENVOY_STACK_ROOTS", &roots)
+            .arg(format!("-s={name}"))
+            .arg("show");
+        command.assert()
+    };
+
+    run("studio").success();
+    fs::remove_dir_all(&share).expect("the share should be removed");
+
+    let offline = run("studio").success();
+    assert!(stdout_text(&offline).contains(&cache_root.display().to_string()));
+    let stderr = stderr_text(&offline);
+    assert!(
+        stderr.contains("cannot be reached; using stack 'studio' (published 2026-09-27)"),
+        "stderr was:\n{stderr}"
+    );
+
+    let unknown = run("never-ran").failure();
+    assert!(
+        stderr_text(&unknown).contains("no earlier run of it is remembered"),
+        "stderr was:\n{}",
+        stderr_text(&unknown)
+    );
+
+    let listing = caching_command(&cache_root)
+        .env("ENVOY_STACK_ROOTS", &roots)
+        .arg("--list-stacks")
+        .assert()
+        .success();
+    let listed = stdout_text(&listing);
+    assert!(
+        listed.contains("Cannot reach the stack root")
+            && listed.contains("start without their share"),
+        "stdout was:\n{listed}"
+    );
+    assert!(
+        listed.contains("studio") && listed.contains("2026-09-27"),
+        "stdout was:\n{listed}"
+    );
+}
+
+#[test]
+fn an_offline_start_never_cleans_up_the_cache() {
+    let scratch = ScratchDir::new("envoy_offline_keeps_cache");
+    let (share, stack) = studio_on_a_share(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = |args: &[&str]| {
+        let mut command = caching_command(&cache_root);
+        command.arg("--stack").arg(&stack).args(args);
+        command
+    };
+
+    // Copy everything and remember the stack, with no cleanup yet.
+    run(&["--no-prune", "--noop"]).assert().success();
+    let unused = cache_root
+        .join("bundles")
+        .join("gt")
+        .join("extra")
+        .join("2.0.0");
+    assert!(unused.is_dir(), "the whole stack was copied");
+    fs::remove_dir_all(&share).expect("the share should be removed");
+
+    // With no idle time allowed, cleanup would remove what this run does not use.
+    let offline = run(&["show"])
+        .env("ENVOY_CACHE_MAX_IDLE_DAYS", "0")
+        .assert()
+        .success();
+    assert!(
+        stderr_text(&offline).contains("using stack 'studio'"),
+        "stderr was:\n{}",
+        stderr_text(&offline)
+    );
+    assert!(unused.is_dir(), "a copy that cannot be fetched again stays");
+    assert!(
+        !cache_root.join("last-prune").exists(),
+        "no cleanup is even started while the only copies are local"
+    );
+}
+
+#[test]
+fn a_stack_of_checkouts_creates_no_cache_directory() {
+    let scratch = ScratchDir::new("envoy_checkouts_no_cache");
+    let tool = scratch.path().join("work").join("tool");
+    write_published_tool(&tool, "tool", "1.0.0");
+    fs::remove_file(tool.join(".bundle")).expect("without its marker the bundle is a checkout");
+    let stack = scratch.path().join("dev.estack");
+    write_stack_of(&stack, &[&tool]);
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .arg("--stack")
+        .arg(&stack)
+        .arg("show")
+        .assert()
+        .success();
+
+    assert!(
+        ran_from(&assert, &tool),
+        "stdout was:\n{}",
+        stdout_text(&assert)
+    );
+    assert!(
+        !cache_root.exists(),
+        "a stack of checkouts has nothing to cache and nothing to remember"
+    );
+}
+
+#[test]
+fn a_stack_chosen_by_context_says_why_it_cannot_start_without_its_share() {
+    let scratch = ScratchDir::new("envoy_context_offline");
+    let cache_root = scratch.path().join("cache");
+
+    let assert = caching_command(&cache_root)
+        .current_dir(scratch.path())
+        .env("ENVOY_STACK_CONTEXT", "gt")
+        .env("ENVOY_STACK_ROOTS", scratch.path().join("no-such-share"))
+        .arg("--list")
+        .assert();
+
+    let stderr = stderr_text(&assert);
+    assert!(
+        stderr.contains("ENVOY_STACK_CONTEXT selects a stack from ENVOY_STACK_ROOTS")
+            && stderr.contains("cannot be reached")
+            && stderr.contains("cannot start without its share"),
+        "stderr was:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Remembered from earlier runs"),
+        "nothing has run here, so there is nothing to suggest; stderr was:\n{stderr}"
+    );
+
+    // Without a context the roots are not even looked at, so there is nothing to say.
+    let quiet = caching_command(&cache_root)
+        .current_dir(scratch.path())
+        .env("ENVOY_STACK_ROOTS", scratch.path().join("no-such-share"))
+        .arg("--list")
+        .assert();
+    assert!(
+        !stderr_text(&quiet).contains("ENVOY_STACK_CONTEXT"),
+        "stderr was:\n{}",
+        stderr_text(&quiet)
+    );
+}
+
+#[test]
+fn a_stack_chosen_by_context_is_remembered_by_name_and_the_note_says_which() {
+    let scratch = ScratchDir::new("envoy_context_remembered");
+    let (share, _) = studio_on_a_share(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = |args: &[&str]| {
+        let mut command = caching_command(&cache_root);
+        command
+            .current_dir(scratch.path())
+            .env("ENVOY_STACK_ROOTS", share.join("stacks"))
+            .args(args);
+        command
+    };
+
+    // Chosen by context while the share is up.
+    run(&["show"])
+        .env("ENVOY_STACK_CONTEXT", "gt")
+        .assert()
+        .success();
+    fs::remove_dir_all(&share).expect("the share should be removed");
+
+    // A context is resolved by searching the roots, so it cannot start now, and
+    // the note names what can.
+    let by_context = run(&["show"]).env("ENVOY_STACK_CONTEXT", "gt").assert();
+    let stderr = stderr_text(&by_context);
+    assert!(
+        stderr.contains("Remembered from earlier runs: studio; start one with --stack <name>"),
+        "stderr was:\n{stderr}"
+    );
+
+    // The name the context chose does not need them.
+    let by_name = run(&["--stack", "studio", "show"]).assert().success();
+    assert!(
+        stderr_text(&by_name).contains("using stack 'studio'"),
+        "stderr was:\n{}",
+        stderr_text(&by_name)
+    );
+    assert!(stdout_text(&by_name).contains(&cache_root.display().to_string()));
+}
+
 /// `envoy` with caching on and the cache in `root`.
 fn caching_command(root: &Path) -> Command {
     let mut command = base_command();

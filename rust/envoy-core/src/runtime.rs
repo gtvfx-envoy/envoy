@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use crate::bundle_cache::BundleCache;
 use crate::commands::{find_commands_file, CommandDefinition, CommandRegistry};
 use crate::discovery::{
-    discover_bundles_auto, discover_bundles_from_roots, is_published_bundle, validate_bundle,
+    discover_bundles_auto_with, discover_bundles_from_roots, is_published_bundle, validate_bundle,
     Bundle, BundleInfo, BUNDLE_CHECKOUT, BUNDLE_ENV_DIR,
 };
 use crate::environment::EnvironmentManager;
@@ -122,6 +122,18 @@ pub fn load_registry(
     commands_file: Option<&Path>,
     bundle_cache: Option<&BundleCache>,
 ) -> Result<(CommandRegistry, Option<Vec<BundleInfo>>)> {
+    load_registry_with_snapshots(bundle_roots, commands_file, bundle_cache, None)
+}
+
+/// [`load_registry`] for a caller that is about to run something: a stack that
+/// loads is remembered under the cache root in `snapshots`, and one whose
+/// share cannot be reached starts from the last time it ran.
+pub fn load_registry_with_snapshots(
+    bundle_roots: Option<&[String]>,
+    commands_file: Option<&Path>,
+    bundle_cache: Option<&BundleCache>,
+    snapshots: Option<&Path>,
+) -> Result<(CommandRegistry, Option<Vec<BundleInfo>>)> {
     let mut registry = CommandRegistry::empty();
     let mut bundles = None;
     let mut bundle_cache = bundle_cache.and_then(|cache| match BundleCache::new(cache.root()) {
@@ -154,7 +166,7 @@ pub fn load_registry(
             bundles = Some(resolved);
         }
     } else {
-        let discovered = retry_sync(&IO_RETRY_CONFIG, discover_bundles_auto)
+        let discovered = retry_sync(&IO_RETRY_CONFIG, || discover_bundles_auto_with(snapshots))
             .map_err(|e| EnvoyError::EnvironmentBuild(format!("Bundle discovery failed: {e}")))?;
         if !discovered.is_empty() {
             // Try to resolve cached versions for each discovered bundle.

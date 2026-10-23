@@ -33,7 +33,7 @@ pub(crate) fn resolve_input_path(path: &Path) -> PathBuf {
     )
 }
 
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
 
     for component in path.components() {

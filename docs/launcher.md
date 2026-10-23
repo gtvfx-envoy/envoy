@@ -99,6 +99,7 @@ When the share cannot be reached, the launcher keeps working from what it has:
 
 - It uses the last good copy of the redirect file it read (saved whenever it reads the share) and says so: `envoy: the redirect file could not be used (...); using the copy saved 3 hours ago`.
 - It runs the version you already have cached.
+- Envoy itself then starts a stack that has run on the machine from the bundles in the local cache (see [Bundle Caching](caching.md#when-the-share-is-unreachable)), so a laptop that was prepared before leaving the network works end to end.
 
 The same happens when the file on the share is there but cannot be used: it does not parse, was written for a newer launcher than yours, or would leave someone with no version (no `default`, a user in a group that has no version, an unsafe version name). A copy is only ever saved from a file that works for everyone, so a bad edit on the share never replaces it. With no saved copy, a file that has such a problem is still used by the people it works for, and `envoy --envoy-shim-resolve` lists what is wrong.
 
