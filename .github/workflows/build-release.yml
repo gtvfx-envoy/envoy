@@ -165,6 +165,11 @@ jobs:
 
       - name: Build and test static native CLIs
         working-directory: rust
+        env:
+          # cross mounts only the Cargo workspace, rust/, at /project, so the
+          # launcher's install-script tests (../../scripts/shim) look in
+          # /scripts. Mount the repository's scripts folder there.
+          CROSS_CONTAINER_OPTS: --volume ${{ github.workspace }}/scripts:/scripts:ro
         run: |
           cross test --workspace --exclude envoy-py --target x86_64-unknown-linux-musl
           cross build --workspace --exclude envoy-py --release --target x86_64-unknown-linux-musl
