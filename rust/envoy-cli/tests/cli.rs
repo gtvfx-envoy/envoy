@@ -1746,8 +1746,9 @@ fn telemetry_redacts_secret_looking_arguments_before_export() {
 /// A copy of the envoy executable laid out as a release is: `bin/envoy`, with
 /// the Python API unpacked in `py/` beside it.
 fn release_copy(root: &Path) -> PathBuf {
-    let built = Command::cargo_bin("envoy").expect("envoy binary should build");
-    let built = Path::new(built.get_program());
+    // Not `Command::cargo_bin`: where a target runner is configured (`cross`),
+    // that returns the runner script and passes the executable to it.
+    let built = Path::new(env!("CARGO_BIN_EXE_envoy"));
     let exe = root
         .join("bin")
         .join(built.file_name().expect("the binary has a file name"));
@@ -1807,7 +1808,13 @@ fn probed(assert: &assert_cmd::assert::Assert, name: &str) -> String {
     printed
         .lines()
         .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
-        .unwrap_or_else(|| panic!("the probe printed no {name}, stdout was:\n{printed}"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe printed no {name} (exit status {}), stdout was:\n{printed}\nstderr was:\n{}",
+                assert.get_output().status,
+                stderr_text(assert)
+            )
+        })
         .to_string()
 }
 
