@@ -19,7 +19,9 @@ use envoy_core::runtime::{
     apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env,
     resolve_team_config_for_bundles,
 };
-use envoy_core::stack::{Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_SETTING};
+use envoy_core::stack::{
+    Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_CONTEXT_VAR, STACK_SETTING,
+};
 use envoy_core::stack_registry::{
     is_stack_name, list_named_stacks, unreachable_stack_roots, NamedStackEntry, STACK_ROOTS_VAR,
 };
@@ -550,6 +552,8 @@ fn load_registry_for_cli(
     };
     if let Some(stack) = selected_stack.as_ref() {
         note_snapshot(stack);
+    } else if cli.stack.is_none() {
+        note_context_without_roots();
     }
 
     // Bundles load from their source paths here. Copying a bundle to local
@@ -753,6 +757,29 @@ fn note_snapshot(stack: &Stack) {
             eprintln!("{line}");
         }
     }
+}
+
+/// A stack chosen by `ENVOY_STACK_CONTEXT` is found by looking through the
+/// stack roots, so it cannot start while they cannot be reached, and nothing is
+/// remembered for it. Say so, rather than leave the person with an unrelated
+/// "no commands" error further on.
+fn note_context_without_roots() {
+    let context_set = env::var(STACK_CONTEXT_VAR).is_ok_and(|value| !value.trim().is_empty());
+    let unreachable = unreachable_stack_roots();
+    if !context_set || unreachable.is_empty() {
+        return;
+    }
+
+    let roots = unreachable
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "envoy: {STACK_CONTEXT_VAR} selects a stack from {STACK_ROOTS_VAR}, but {roots} cannot \
+be reached, so no stack was selected. A stack chosen by context cannot start without its share; \
+name it with --stack to start the copy remembered from its last run"
+    );
 }
 
 /// Keep what the stack came to, so it can start again without its share.

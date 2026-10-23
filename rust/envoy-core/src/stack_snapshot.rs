@@ -17,6 +17,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -283,7 +284,7 @@ pub fn save(root: &Path, selector: &Selector, snapshot: &Snapshot) -> io::Result
     let folder = folder(root);
     fs::create_dir_all(&folder)?;
     let path = folder.join(selector.file_name());
-    let temporary = path.with_extension(format!("tmp{}", std::process::id()));
+    let temporary = temporary_for(&path);
 
     let text = serde_json::to_string_pretty(snapshot).map_err(io::Error::other)?;
     fs::write(&temporary, text)?;
@@ -292,6 +293,18 @@ pub fn save(root: &Path, selector: &Selector, snapshot: &Snapshot) -> io::Result
         return Err(error);
     }
     Ok(())
+}
+
+/// A name for the file a save is written to before it replaces `path`. It is
+/// different for every save, so envoys in other processes and threads in this
+/// one, saving the same snapshot at once, never write into each other's file.
+fn temporary_for(path: &Path) -> PathBuf {
+    static SAVES: AtomicU64 = AtomicU64::new(0);
+    path.with_extension(format!(
+        "tmp{}-{}",
+        std::process::id(),
+        SAVES.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 /// A named stack that has run on this machine.
@@ -450,6 +463,24 @@ mod tests {
             load(root.path(), &selector).is_none(),
             "a damaged file is not an error"
         );
+    }
+
+    #[test]
+    fn every_save_is_written_to_a_file_of_its_own_before_it_replaces_the_snapshot() {
+        let path = Path::new("studio-0123456789abcdef.json");
+
+        let first = temporary_for(path);
+        let second = temporary_for(path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), path.parent());
+        for temporary in [&first, &second] {
+            let extension = temporary.extension().and_then(|ext| ext.to_str());
+            assert!(
+                extension.is_some_and(|ext| ext.starts_with("tmp")),
+                "{temporary:?} must not look like a snapshot to `remembered`"
+            );
+        }
     }
 
     #[test]

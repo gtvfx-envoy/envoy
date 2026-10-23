@@ -169,7 +169,7 @@ impl Stack {
             }
             Err(Failure::Broken(error)) => Err(error),
             Err(Failure::Unreachable { reason, error }) => match cache_root {
-                Some(root) => Self::from_snapshot(raw, selector, root, reason),
+                Some(root) => Self::from_snapshot(raw, selector, root, reason, error),
                 // Nothing to fall back on, but the real cause is worth saying.
                 None => Err(match error {
                     EnvoyError::Validation(message) => {
@@ -217,11 +217,16 @@ impl Stack {
         selector: Selector,
         cache_root: &Path,
         reason: String,
+        error: EnvoyError,
     ) -> Result<Self> {
         let Some((snapshot, confirmed)) = stack_snapshot::load(cache_root, &selector) else {
+            // Say what was asked for and why it failed, as the error always did.
+            let what = match error {
+                EnvoyError::Validation(message) => format!("{message} ({reason})"),
+                _ => reason,
+            };
             return Err(EnvoyError::Validation(format!(
-                "Stack {raw:?} is not available: {reason}, and no earlier run of it is \
-remembered on this machine"
+                "{what}, and no earlier run of it is remembered on this machine"
             )));
         };
 
@@ -270,25 +275,41 @@ this machine ({})",
     /// uses it, when it is new or has changed. Returns whether anything was
     /// written.
     ///
+    /// "Changed" means the stack file, or where one of its bundles is, what it
+    /// is called, or the version its marker states: a bundle republished in
+    /// place at the same path is a change. A bundle whose marker exists but
+    /// cannot be read keeps what was recorded for it, so a share that is
+    /// failing never replaces a good record with a worse one.
+    ///
     /// Call it once the stack's bundles have loaded, so that only a stack that
     /// worked is kept. A stack that was not found with
     /// [`from_selector`](Self::from_selector), or that was itself rebuilt from
-    /// a snapshot, has nothing to remember.
+    /// a snapshot, has nothing to remember, and neither has a stack with no
+    /// published bundle: only a published bundle can be found in the store, so
+    /// a stack of checkouts has nothing to start from, and the cache is left
+    /// alone.
     pub fn save_snapshot(&self, cache_root: &Path) -> Result<bool> {
         let (Some(selector), None) = (self.selector.as_ref(), self.snapshot.as_ref()) else {
             return Ok(false);
         };
         let entries = self.bundle_entries()?;
-        let stamp = stack_snapshot::stamp_of(&self.path);
+        let saved = stack_snapshot::load(cache_root, selector).map(|(snapshot, _)| snapshot);
 
-        if let Some((saved, _)) = stack_snapshot::load(cache_root, selector) {
-            let same_bundles = saved.bundles.len() == entries.len()
-                && saved
-                    .bundles
-                    .iter()
-                    .zip(&entries)
-                    .all(|(saved, entry)| saved.path == entry.bundle.path());
-            if same_bundles && saved.is_of(&self.path, stamp) {
+        let bundles: Vec<SnapshotBundle> = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let recorded = saved.as_ref().and_then(|saved| saved.bundles.get(index));
+                snapshot_bundle(entry, recorded)
+            })
+            .collect();
+        if bundles.iter().all(|bundle| bundle.version.is_none()) {
+            return Ok(false);
+        }
+
+        let stamp = stack_snapshot::stamp_of(&self.path);
+        if let Some(saved) = &saved {
+            if saved.bundles == bundles && saved.is_of(&self.path, stamp) {
                 stack_snapshot::confirm(cache_root, selector);
                 return Ok(false);
             }
@@ -300,19 +321,7 @@ this machine ({})",
         snapshot.registry_version = self.registry_version.clone();
         snapshot.pinned_version = self.pinned_version.clone();
         snapshot.metadata = self.metadata.clone();
-        snapshot.bundles = entries
-            .iter()
-            .map(|entry| {
-                let version = entry.bundle.version();
-                SnapshotBundle {
-                    path: entry.bundle.path().to_path_buf(),
-                    namespace: entry.bundle.namespace().to_string(),
-                    name: entry.bundle.name().to_string(),
-                    version: (version != BUNDLE_CHECKOUT).then_some(version),
-                    metadata: entry.metadata.clone(),
-                }
-            })
-            .collect();
+        snapshot.bundles = bundles;
 
         stack_snapshot::save(cache_root, selector, &snapshot).map_err(|source| EnvoyError::Io {
             path: stack_snapshot::folder(cache_root),
@@ -448,19 +457,7 @@ this machine ({})",
             });
         }
 
-        let contents = fs::read_to_string(&path).map_err(|source| {
-            let reason = format!("{} cannot be read: {source}", path.display());
-            let damaged = source.kind() == io::ErrorKind::InvalidData;
-            let error = EnvoyError::Io {
-                path: path.clone(),
-                source,
-            };
-            if damaged {
-                Failure::Broken(error)
-            } else {
-                Failure::Unreachable { reason, error }
-            }
-        })?;
+        let contents = fs::read_to_string(&path).map_err(|source| read_failure(&path, source))?;
         let document: StackDocument = serde_yaml::from_str(&contents).map_err(|source| {
             Failure::Broken(EnvoyError::Validation(format!(
                 "Invalid YAML stack at {}: {source}",
@@ -667,6 +664,59 @@ fn unique_namespace_match(stacks: &[Stack], namespace: &str) -> Result<Option<St
     }
 }
 
+/// What failing to read a stack file that is there means.
+///
+/// A file that cannot be decoded, or that refuses to be read ("access denied"),
+/// is a stack that is wrong: the share answered, so this is not an outage, and
+/// a snapshot standing in for it would hide a bad publish or a permissions
+/// mistake from everyone who runs it. Anything else, such as a connection that
+/// dropped mid-read, says the location cannot be reached.
+fn read_failure(path: &Path, source: io::Error) -> Failure {
+    let reason = format!("{} cannot be read: {source}", path.display());
+    let wrong = matches!(
+        source.kind(),
+        io::ErrorKind::InvalidData | io::ErrorKind::PermissionDenied
+    );
+    let error = EnvoyError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    if wrong {
+        Failure::Broken(error)
+    } else {
+        Failure::Unreachable { reason, error }
+    }
+}
+
+/// A stack entry as a snapshot records it. A published bundle whose marker
+/// exists but cannot be read right now keeps what was recorded for it.
+fn snapshot_bundle(entry: &StackBundleEntry, recorded: Option<&SnapshotBundle>) -> SnapshotBundle {
+    let bundle = &entry.bundle;
+    let version = bundle.version();
+    let current = SnapshotBundle {
+        path: bundle.path().to_path_buf(),
+        namespace: bundle.namespace().to_string(),
+        name: bundle.name().to_string(),
+        version: (version != BUNDLE_CHECKOUT).then_some(version),
+        metadata: entry.metadata.clone(),
+    };
+
+    match recorded {
+        Some(recorded)
+            if current.version.is_none()
+                && recorded.version.is_some()
+                && recorded.path == current.path
+                && bundle.is_production() =>
+        {
+            SnapshotBundle {
+                metadata: current.metadata,
+                ..recorded.clone()
+            }
+        }
+        _ => current,
+    }
+}
+
 /// The local stand-in for a bundle in a snapshot: its copy in the store when
 /// it is published, or itself when it is a checkout that is on disk.
 fn offline_bundle(saved: &SnapshotBundle, store: Option<&Store>) -> Option<Bundle> {
@@ -791,12 +841,14 @@ mod tests {
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::io;
     use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
 
     use super::{
-        Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE, STACK_CONTEXT_VAR, STACK_VAR,
+        read_failure, Failure, Stack, DEFAULT_STACK_MAX_DEPTH, DEFAULT_STACK_NAMESPACE,
+        STACK_CONTEXT_VAR, STACK_VAR,
     };
     use crate::bundle_store::{load_registry_for_run_with, warm, CacheSettings, Store};
     use crate::discovery::BundleInfo;
@@ -804,7 +856,7 @@ mod tests {
     use crate::path_test::assert_same_path;
     use crate::runtime::{apply_bundle_overrides, load_registry};
     use crate::stack_registry::STACK_ROOTS_VAR;
-    use envoy_store::Quiet;
+    use envoy_store::{EntryKey, Quiet};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -1299,12 +1351,139 @@ mod tests {
 
         let error = Stack::from_selector(&studio.arg(), Some(&studio.cache))
             .expect_err("there is nothing to fall back on");
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("no earlier run of it is remembered"),
-            "{error}"
+            message.contains("Stack path does not exist")
+                && message.contains("cannot be reached")
+                && message.contains("no earlier run of it is remembered"),
+            "what was asked for, why it failed and that nothing is remembered: {message}"
         );
+    }
+
+    /// Where `Studio` publishes its python bundle.
+    fn python_of(studio: &Studio) -> PathBuf {
+        studio
+            .share
+            .join("bndl")
+            .join("ext")
+            .join("python")
+            .join("3.11.9-envoy.2")
+    }
+
+    #[test]
+    fn a_bundle_republished_in_place_is_followed_by_the_snapshot() {
+        let studio = Studio::new();
+        studio.run(2);
+
+        // The same path with a new version: nothing in the stack file changed.
+        fs::write(
+            python_of(&studio).join(".bundle"),
+            r#"{"bndlid": "ext:python", "name": "python", "version": "3.11.9-envoy.3"}"#,
+        )
+        .expect("marker is rewritten");
+        let stack =
+            Stack::from_selector(&studio.arg(), Some(&studio.cache)).expect("stack should load");
+        stack.bundle_infos().expect("bundles should load");
+        assert!(
+            stack
+                .save_snapshot(&studio.cache)
+                .expect("saving should not fail"),
+            "a new version is a change, even at the same path"
+        );
+        warmed(&stack, &studio.cache, 2);
+
+        // The old copy goes the way an unused one does, and the share goes too.
+        let store = Store::open(&studio.cache).expect("the store should open");
+        let old = EntryKey::new("ext", "python", "3.11.9-envoy.2").expect("key is valid");
+        fs::remove_dir_all(store.entry_path(&old)).expect("the old copy should be removed");
+        studio.lose_the_share();
+
+        let offline = Stack::from_selector(&studio.arg(), Some(&studio.cache))
+            .expect("the stack should start without its share");
+        let info = offline.snapshot_info().expect("it should be rebuilt");
+        assert!(info.unavailable.is_empty(), "{:?}", info.unavailable);
+        let bundles = offline.bundle_infos().expect("bundles should load");
+        assert!(
+            bundles[0].root.ends_with("3.11.9-envoy.3"),
+            "the newest version it ran: {:?}",
+            bundles[0].root
+        );
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_read_does_not_replace_a_good_record() {
+        let studio = Studio::new();
+        studio.run(2);
+
+        // A share that is failing: the marker is there, but it cannot be used.
+        fs::write(python_of(&studio).join(".bundle"), "{ not json").expect("marker is damaged");
+        let stack =
+            Stack::from_selector(&studio.arg(), Some(&studio.cache)).expect("stack should load");
+        stack.bundle_infos().expect("bundles should load");
+        assert!(
+            !stack
+                .save_snapshot(&studio.cache)
+                .expect("saving should not fail"),
+            "what was recorded is kept"
+        );
+        studio.lose_the_share();
+
+        let offline = Stack::from_selector(&studio.arg(), Some(&studio.cache))
+            .expect("the stack should start without its share");
+        assert_eq!(ids(&offline), vec!["ext:python", "gt:globals"]);
+        assert!(offline
+            .snapshot_info()
+            .expect("it should be rebuilt")
+            .unavailable
+            .is_empty());
+    }
+
+    #[test]
+    fn a_stack_of_checkouts_is_not_remembered_and_leaves_the_cache_alone() {
+        let temp = tempdir().expect("tempdir should be created");
+        let one = create_bundle(&temp.path().join("work"), "one");
+        let stack_path = temp.path().join("dev.estack");
+        write_stack_of(&stack_path, &[&one]);
+        let cache = temp.path().join("cache");
+
+        let stack = Stack::from_selector(&stack_path.to_string_lossy(), Some(&cache))
+            .expect("stack should load");
+        stack.bundle_infos().expect("bundles should load");
+
+        assert!(!stack.save_snapshot(&cache).expect("saving should not fail"));
+        assert!(
+            !cache.exists(),
+            "a stack with nothing published has nothing to start from, so nothing is written"
+        );
+    }
+
+    #[test]
+    fn a_stack_file_that_refuses_to_be_read_is_wrong_and_a_dropped_connection_is_an_outage() {
+        let path = Path::new("studio.estack");
+
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::InvalidData] {
+            assert!(
+                matches!(
+                    read_failure(path, io::Error::from(kind)),
+                    Failure::Broken(_)
+                ),
+                "{kind:?} means the share answered and the stack is wrong"
+            );
+        }
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::NotFound,
+            io::ErrorKind::Other,
+        ] {
+            assert!(
+                matches!(
+                    read_failure(path, io::Error::from(kind)),
+                    Failure::Unreachable { .. }
+                ),
+                "{kind:?} means the location cannot be reached"
+            );
+        }
     }
 
     #[test]

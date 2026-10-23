@@ -550,10 +550,19 @@ pub fn cache_for_command(
         return (registry, Some(bundle_list));
     };
 
+    // A bundle that is already in the store may have no other copy: it is what
+    // a stack started from its snapshot runs from while its share is down, and
+    // it cannot be fetched again until the share is back. Nothing is cleaned
+    // up on such a run, however long ago the rest was last used.
+    let from_store = bundle_list
+        .iter()
+        .any(|bundle| bundle.root.starts_with(store.root()));
+    let pruning = settings.clone().with_prune(settings.prune && !from_store);
+
     let printer = ProgressPrinter::new();
     let cached = cache_published(bundle_list.clone(), &published, &store, &printer);
     if cached == bundle_list {
-        prune_in_background(store, settings);
+        prune_in_background(store, &pruning);
         return (registry, Some(bundle_list));
     }
 
@@ -561,7 +570,7 @@ pub fn cache_for_command(
     // registry is rebuilt from the cached roots rather than patched.
     let mut rebuilt = CommandRegistry::empty();
     rebuilt.load_from_bundles(&cached);
-    prune_in_background(store, settings);
+    prune_in_background(store, &pruning);
 
     if rebuilt.get(command_name).is_some() || env_override.is_some() {
         (rebuilt, Some(cached))
@@ -940,6 +949,37 @@ mod tests {
         assert!(
             !off.root.exists(),
             "an off switch must not even create the store"
+        );
+    }
+
+    #[test]
+    fn a_run_whose_bundles_already_come_from_the_store_never_cleans_it_up() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let mut registry = CommandRegistry::empty();
+        registry.load_from_bundles(&bundles);
+        let settings = CacheSettings {
+            root: temp.path().join("store"),
+            ..settings(&[])
+        };
+
+        // From their source, the store is looked after as ever.
+        let (registry, cached) = cache_for_command(registry, Some(bundles), "run", None, &settings);
+        assert!(
+            last_prune(&settings).is_some(),
+            "a run from the source cleans up at most once a day"
+        );
+        fs::remove_file(settings.root.join(LAST_PRUNE_FILE)).expect("the stamp is removed");
+
+        // From the store itself, as when a stack starts without its share, the
+        // copies there may be the only ones, so nothing is removed.
+        let cached = cached.expect("bundles are returned");
+        let (_, again) = cache_for_command(registry, Some(cached.clone()), "run", None, &settings);
+
+        assert_eq!(again, Some(cached));
+        assert!(
+            last_prune(&settings).is_none(),
+            "no cleanup is started while the only copies are local"
         );
     }
 

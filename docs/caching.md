@@ -2,7 +2,7 @@
 
 Published bundles usually live on a network share. Reading a Python install or a Qt distribution over the network makes every start slow, and stops working when the share is unreachable. Envoy copies the bundles a command uses to local disk the first time it needs them, then runs from that copy. It also remembers the stack that ran, so that [a stack can start again when the share cannot be reached](#when-the-share-is-unreachable).
 
-Your own checkouts are never cached: a bundle without a `.bundle` marker always runs from where it is. A run that needs only such bundles does not even create the cache directory.
+Your own checkouts are never cached: a bundle without a `.bundle` marker always runs from where it is. A run that needs only such bundles copies nothing, and a stack made only of them does not even create the cache directory.
 
 ## What happens on the first run
 
@@ -82,14 +82,20 @@ Looking at things works offline too: `--list`, `--info`, `--which` and `--diagno
 Envoy only falls back when the stack's location cannot be reached. These are still errors, because they mean the stack is wrong rather than away:
 
 - A name the stack roots do not publish, while the roots can be reached. `en --list-stacks` shows what they do publish.
-- A stack file that is invalid, or that was removed from a folder that can be reached.
+- A stack file that is invalid, that was removed from a folder that can be reached, or that cannot be read because access is denied. The share answered, so this is a permissions or publishing mistake, and quietly running the previous version would hide it from whoever made it.
 - A stack that has not run on this machine with caching on, or whose bundles were all removed from the cache (the message says which).
 
 `--set-stack` always needs the real stack, so that it never saves a value it could not check. `ENVOY_CACHE=off` turns the whole mechanism off.
 
-The memory is refreshed each time a command runs with the share reachable and the stack has changed, so "as it was 3 hours ago" is the last time envoy read the stack from its share. The Python API follows the same rule as for caching: `envoy.getEnvironment(...)` and `envoy.proc.Environment(...)` run from the cache, so they start a remembered stack too, while the functions that only look, such as `getBundles()`, read the share and nothing else.
+Not every stack is remembered:
 
-A share that hangs instead of refusing the connection can make the first access wait for the operating system's own timeout before envoy falls back.
+- Only a stack selected by name or by path is: `--stack`, `ENVOY_STACK`, or the `stack` setting. A stack chosen through `ENVOY_STACK_CONTEXT` is found by searching the stack roots, so it cannot start without them. Envoy says so when the roots cannot be reached, and `en --stack <name>` starts the remembered copy.
+- A stack with no published bundle is not, because there is nothing in the cache to start it from; running one does not create the cache directory.
+- A stack file on local disk that lists bundles on a share that is down does not start from memory either. Envoy cannot tell a share that is down from a mistyped path, and would otherwise hide the mistake.
+
+The memory is refreshed each time a command runs with the share reachable and something has changed: the stack file, where one of its bundles is, or the version a bundle's marker states, so a bundle republished in place at the same path is followed. "As it was 3 hours ago" is the last time envoy read the stack from its share. While a stack runs from its memory, nothing in the cache is cleaned up (see [Cleaning up](#cleaning-up)). The Python API follows the same rule as for caching: `envoy.getEnvironment(...)` and `envoy.proc.Environment(...)` run from the cache, so they start a remembered stack too, while the functions that only look, such as `getBundles()`, read the share and nothing else.
+
+A share that hangs instead of refusing the connection can make the first access wait for the operating system's own timeout before envoy falls back. On Linux and macOS, a stack root that is itself the mount point of a share looks reachable when the share is not mounted (the folder is there, and empty), so the name is reported as not published; keep `ENVOY_STACK_ROOTS` pointed at a folder inside the share, which is missing until it is mounted.
 
 ## Looking after the cache
 
@@ -109,7 +115,7 @@ These commands work on the cache directory alone, so they are fast and need no s
 
 A bundle that nothing has used for 30 days (or `ENVOY_CACHE_MAX_IDLE_DAYS`) is removed. When a size limit is set, the least recently used bundles are removed until the cache fits.
 
-Envoy does this itself: at most once a day it prunes in the background while your command runs (skip it with `--no-prune`), and it never removes a bundle that a running envoy is using. There is nothing to schedule. `en cache prune` runs the same cleanup on demand.
+Envoy does this itself: at most once a day it prunes in the background while your command runs (skip it with `--no-prune`), and it never removes a bundle that a running envoy is using. There is nothing to schedule. `en cache prune` runs the same cleanup on demand. A run that starts a stack from its memory while the share is down skips it, because the copies it runs from may be the only ones.
 
 ## Bundles that are not cached
 
