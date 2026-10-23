@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "bench_cache.py"
 SPEC = importlib.util.spec_from_file_location("bench_cache", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -26,12 +28,29 @@ def testFixtureWritesPublishedBundlesAndAStackThatNamesThem(tmp_path):
     assert markers == ["ext:bulk", "ext:deep", "ext:swarm", "gt:tools"]
     assert stack.read_text(encoding="utf-8").count("- path:") == 4
 
-    deep = next((studio / "bndl").glob("ext/deep/*"))
+    # The deep paths run past 260 characters in a long temporary directory, so they are
+    # read back the way they were written.
+    deep = bench_cache.longPath(next((studio / "bndl").glob("ext/deep/*")))
     longest = max(
         len(path.relative_to(deep).as_posix()) for path in deep.rglob("*") if path.is_file()
     )
     assert longest >= 150
     assert len(list((studio / "bndl" / "ext" / "swarm").rglob("module_*.py"))) == 60
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the extended-length form is a Windows one")
+def testLongPathUsesTheExtendedLengthFormOnce(tmp_path):
+    """Windows accepts a path past 260 characters only in the extended-length form."""
+    plain = bench_cache.longPath(tmp_path / "a")
+    assert str(plain) == "\\\\?\\" + str(tmp_path / "a")
+    assert bench_cache.longPath(plain) == plain
+    assert str(bench_cache.longPath(Path("//server/share/a"))) == "\\\\?\\UNC\\server\\share\\a"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows is the one that needs the prefix")
+def testLongPathLeavesOtherSystemsAlone(tmp_path):
+    """Only Windows has a path length limit worth working around."""
+    assert bench_cache.longPath(tmp_path / "a") == tmp_path / "a"
 
 
 def testCountWarningsIgnoresColourCodesAndOtherLevels():
