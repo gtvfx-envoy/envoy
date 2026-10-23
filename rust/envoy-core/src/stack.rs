@@ -652,7 +652,11 @@ fn unique_namespace_match(stacks: &[Stack], namespace: &str) -> Result<Option<St
 
     match matches.as_slice() {
         [] => Ok(None),
-        [stack] => Stack::from_name(&stack.name).map(Some),
+        [stack] => Stack::from_name(&stack.name).map(|mut found| {
+            // The same stack `--stack <name>` loads, so it is remembered as that.
+            found.selector = Some(Selector::Name(found.name.clone()));
+            Some(found)
+        }),
         _ => Err(EnvoyError::Validation(format!(
             "Multiple stacks match namespace {namespace:?}: {}",
             matches
@@ -1746,5 +1750,69 @@ mod tests {
         assert!(
             Stack::current(true, None, DEFAULT_STACK_NAMESPACE, DEFAULT_STACK_MAX_DEPTH).is_err()
         );
+    }
+
+    #[test]
+    fn a_stack_chosen_by_context_is_remembered_under_its_name() {
+        let _lock = crate::env_test_lock::MUTEX
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let temp = tempdir().expect("tempdir should be created");
+        let share = temp.path().join("share");
+        let python = publish_bundle(
+            &share.join("bndl").join("ext"),
+            "ext",
+            "python",
+            "3.11.9-envoy.2",
+        );
+        let stack_roots = share.join("stacks");
+        write_stack_of(
+            &stack_roots
+                .join("studio")
+                .join("2026-09-27")
+                .join("studio.estack"),
+            &[&python],
+        );
+        let cache = temp.path().join("cache");
+        let roots = env::join_paths([&stack_roots]).expect("roots should join");
+        let _roots_guard = EnvVarGuard::set(STACK_ROOTS_VAR, Some(roots.as_os_str()));
+        let _context_guard = EnvVarGuard::set(STACK_CONTEXT_VAR, Some(OsStr::new("gt")));
+        let _stack_guard = EnvVarGuard::set(STACK_VAR, None);
+        let by_context = || {
+            Stack::current_with_snapshots(
+                true,
+                None,
+                DEFAULT_STACK_NAMESPACE,
+                DEFAULT_STACK_MAX_DEPTH,
+                Some(&cache),
+            )
+        };
+
+        let chosen = by_context()
+            .expect("the context should resolve")
+            .expect("a stack should be selected");
+        assert_eq!(chosen.name(), "studio");
+        chosen.bundle_infos().expect("bundles should load");
+        assert!(
+            chosen
+                .save_snapshot(&cache)
+                .expect("saving should not fail"),
+            "a stack found through a context is remembered like any other"
+        );
+        warmed(&chosen, &cache, 1);
+        fs::remove_dir_all(&share).expect("the share should be removed");
+
+        // The context is resolved by searching the roots, so it needs them...
+        assert!(
+            by_context()
+                .expect("a missing root is not an error")
+                .is_none(),
+            "nothing can be chosen without the roots"
+        );
+        // ...but the name it chose does not.
+        let offline = Stack::from_selector("studio", Some(&cache))
+            .expect("the remembered stack should start");
+        assert_eq!(ids(&offline), vec!["ext:python"]);
+        assert!(offline.snapshot_info().is_some());
     }
 }

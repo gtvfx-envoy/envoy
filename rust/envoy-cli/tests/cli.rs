@@ -889,9 +889,65 @@ fn a_stack_chosen_by_context_says_why_it_cannot_start_without_its_share() {
     assert!(
         stderr.contains("ENVOY_STACK_CONTEXT selects a stack from ENVOY_STACK_ROOTS")
             && stderr.contains("cannot be reached")
-            && stderr.contains("--stack"),
+            && stderr.contains("cannot start without its share"),
         "stderr was:\n{stderr}"
     );
+    assert!(
+        !stderr.contains("Remembered from earlier runs"),
+        "nothing has run here, so there is nothing to suggest; stderr was:\n{stderr}"
+    );
+
+    // Without a context the roots are not even looked at, so there is nothing to say.
+    let quiet = caching_command(&cache_root)
+        .current_dir(scratch.path())
+        .env("ENVOY_STACK_ROOTS", scratch.path().join("no-such-share"))
+        .arg("--list")
+        .assert();
+    assert!(
+        !stderr_text(&quiet).contains("ENVOY_STACK_CONTEXT"),
+        "stderr was:\n{}",
+        stderr_text(&quiet)
+    );
+}
+
+#[test]
+fn a_stack_chosen_by_context_is_remembered_by_name_and_the_note_says_which() {
+    let scratch = ScratchDir::new("envoy_context_remembered");
+    let (share, _) = studio_on_a_share(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = |args: &[&str]| {
+        let mut command = caching_command(&cache_root);
+        command
+            .current_dir(scratch.path())
+            .env("ENVOY_STACK_ROOTS", share.join("stacks"))
+            .args(args);
+        command
+    };
+
+    // Chosen by context while the share is up.
+    run(&["show"])
+        .env("ENVOY_STACK_CONTEXT", "gt")
+        .assert()
+        .success();
+    fs::remove_dir_all(&share).expect("the share should be removed");
+
+    // A context is resolved by searching the roots, so it cannot start now, and
+    // the note names what can.
+    let by_context = run(&["show"]).env("ENVOY_STACK_CONTEXT", "gt").assert();
+    let stderr = stderr_text(&by_context);
+    assert!(
+        stderr.contains("Remembered from earlier runs: studio; start one with --stack <name>"),
+        "stderr was:\n{stderr}"
+    );
+
+    // The name the context chose does not need them.
+    let by_name = run(&["--stack", "studio", "show"]).assert().success();
+    assert!(
+        stderr_text(&by_name).contains("using stack 'studio'"),
+        "stderr was:\n{}",
+        stderr_text(&by_name)
+    );
+    assert!(stdout_text(&by_name).contains(&cache_root.display().to_string()));
 }
 
 /// `envoy` with caching on and the cache in `root`.

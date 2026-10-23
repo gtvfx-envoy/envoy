@@ -553,7 +553,7 @@ fn load_registry_for_cli(
     if let Some(stack) = selected_stack.as_ref() {
         note_snapshot(stack);
     } else if cli.stack.is_none() {
-        note_context_without_roots();
+        note_context_without_roots(cache);
     }
 
     // Bundles load from their source paths here. Copying a bundle to local
@@ -760,13 +760,17 @@ fn note_snapshot(stack: &Stack) {
 }
 
 /// A stack chosen by `ENVOY_STACK_CONTEXT` is found by looking through the
-/// stack roots, so it cannot start while they cannot be reached, and nothing is
-/// remembered for it. Say so, rather than leave the person with an unrelated
-/// "no commands" error further on.
-fn note_context_without_roots() {
-    let context_set = env::var(STACK_CONTEXT_VAR).is_ok_and(|value| !value.trim().is_empty());
+/// stack roots, so it cannot start while they cannot be reached. Say so, and
+/// name the stacks that were remembered from earlier runs (a stack found
+/// through a context is remembered under its name like any other), rather than
+/// leave the person with an unrelated "no commands" error further on.
+fn note_context_without_roots(cache: &CacheSettings) {
+    // First, so that a run with no context never touches the stack roots.
+    if !env::var(STACK_CONTEXT_VAR).is_ok_and(|value| !value.trim().is_empty()) {
+        return;
+    }
     let unreachable = unreachable_stack_roots();
-    if !context_set || unreachable.is_empty() {
+    if unreachable.is_empty() {
         return;
     }
 
@@ -775,10 +779,25 @@ fn note_context_without_roots() {
         .map(|root| root.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
+    let remembered = if cache.enabled {
+        remembered_stacks(&cache.root)
+    } else {
+        Vec::new()
+    };
+    let advice = if remembered.is_empty() {
+        String::new()
+    } else {
+        let names = remembered
+            .iter()
+            .map(|stack| stack.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(". Remembered from earlier runs: {names}; start one with --stack <name>")
+    };
     eprintln!(
         "envoy: {STACK_CONTEXT_VAR} selects a stack from {STACK_ROOTS_VAR}, but {roots} cannot \
-be reached, so no stack was selected. A stack chosen by context cannot start without its share; \
-name it with --stack to start the copy remembered from its last run"
+be reached, so no stack was selected; a stack chosen by context cannot start without its \
+share{advice}"
     );
 }
 

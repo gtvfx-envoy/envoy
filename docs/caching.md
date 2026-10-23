@@ -83,15 +83,16 @@ Envoy only falls back when the stack's location cannot be reached. These are sti
 
 - A name the stack roots do not publish, while the roots can be reached. `en --list-stacks` shows what they do publish.
 - A stack file that is invalid, that was removed from a folder that can be reached, or that cannot be read because access is denied. The share answered, so this is a permissions or publishing mistake, and quietly running the previous version would hide it from whoever made it.
-- A stack that has not run on this machine with caching on, or whose bundles were all removed from the cache (the message says which).
+- A stack that has not run on this machine with caching on, or that has no published bundle (nothing is remembered for one, since there is nothing in the cache to start it from), or whose bundles were all removed from the cache (the message says which).
 
 `--set-stack` always needs the real stack, so that it never saves a value it could not check. `ENVOY_CACHE=off` turns the whole mechanism off.
 
-Not every stack is remembered:
+Two things are not remembered, or cannot start offline:
 
-- Only a stack selected by name or by path is: `--stack`, `ENVOY_STACK`, or the `stack` setting. A stack chosen through `ENVOY_STACK_CONTEXT` is found by searching the stack roots, so it cannot start without them. Envoy says so when the roots cannot be reached, and `en --stack <name>` starts the remembered copy.
-- A stack with no published bundle is not, because there is nothing in the cache to start it from; running one does not create the cache directory.
-- A stack file on local disk that lists bundles on a share that is down does not start from memory either. Envoy cannot tell a share that is down from a mistyped path, and would otherwise hide the mistake.
+- A stack with no published bundle is not remembered, because there is nothing in the cache to start it from; running one does not create the cache directory.
+- A stack file on local disk that lists bundles on a share that is down does not start from memory. Envoy cannot tell a share that is down from a mistyped path, and would otherwise hide the mistake.
+
+A stack chosen through `ENVOY_STACK_CONTEXT` is remembered under its name like any other, but a context is resolved by searching the stack roots, so it cannot start without them. When the roots cannot be reached, the command line says so and names the stacks it remembers (`en --list-stacks` lists them too); start one with `en --stack <name>`. Only the command line does this; the Python API does not look for a context stack that it cannot find.
 
 The memory is refreshed each time a command runs with the share reachable and something has changed: the stack file, where one of its bundles is, or the version a bundle's marker states, so a bundle republished in place at the same path is followed. "As it was 3 hours ago" is the last time envoy read the stack from its share. While a stack runs from its memory, nothing in the cache is cleaned up (see [Cleaning up](#cleaning-up)). The Python API follows the same rule as for caching: `envoy.getEnvironment(...)` and `envoy.proc.Environment(...)` run from the cache, so they start a remembered stack too, while the functions that only look, such as `getBundles()`, read the share and nothing else.
 
