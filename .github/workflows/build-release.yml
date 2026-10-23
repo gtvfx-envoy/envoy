@@ -115,6 +115,14 @@ jobs:
           --binary-dir rust/target/release
           --windows
 
+      - name: Package launcher
+        run: >-
+          python scripts/package_shim.py
+          --version $env:RELEASE_VERSION
+          --target-name windows-x86_64
+          --binary-dir rust/target/release
+          --windows
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -157,6 +165,11 @@ jobs:
 
       - name: Build and test static native CLIs
         working-directory: rust
+        env:
+          # cross mounts only the Cargo workspace, rust/, at /project, so the
+          # launcher's install-script tests (../../scripts/shim) look in
+          # /scripts. Mount the repository's scripts folder there.
+          CROSS_CONTAINER_OPTS: --volume ${{ github.workspace }}/scripts:/scripts:ro
         run: |
           cross test --workspace --exclude envoy-py --target x86_64-unknown-linux-musl
           cross build --workspace --exclude envoy-py --release --target x86_64-unknown-linux-musl
@@ -202,6 +215,13 @@ jobs:
       - name: Package Linux bundle
         run: >-
           python scripts/package_release.py
+          --version "$RELEASE_VERSION"
+          --target-name linux-x86_64-musl
+          --binary-dir rust/target/x86_64-unknown-linux-musl/release
+
+      - name: Package launcher
+        run: >-
+          python scripts/package_shim.py
           --version "$RELEASE_VERSION"
           --target-name linux-x86_64-musl
           --binary-dir rust/target/x86_64-unknown-linux-musl/release
@@ -274,6 +294,13 @@ jobs:
       - name: Package macOS bundle
         run: >-
           python3 scripts/package_release.py
+          --version "$RELEASE_VERSION"
+          --target-name ${{ matrix.target_name }}
+          --binary-dir rust/target/release
+
+      - name: Package launcher
+        run: >-
+          python3 scripts/package_shim.py
           --version "$RELEASE_VERSION"
           --target-name ${{ matrix.target_name }}
           --binary-dir rust/target/release

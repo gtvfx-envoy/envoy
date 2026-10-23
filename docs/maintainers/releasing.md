@@ -232,7 +232,7 @@ Run **Tag Release** in `envoy` with the same version. It verifies that:
 The workflow pushes an annotated `v<version>` tag through the GitHub App. The
 existing **Build & Release** workflow first verifies that the tag matches the
 Cargo workspace version, then builds and tests all platforms, creates checksums,
-and publishes the GitHub Release. Confirm the release has all nine expected
+and publishes the GitHub Release. Confirm the release has all thirteen expected
 assets (see [Release artifacts](build-chain.md#release-artifacts)).
 
 !!! warning "Do not create the tag or the GitHub Release by hand"
