@@ -4,7 +4,22 @@ Envoy releases support Windows, Linux, and macOS. Download the archive or
 wheel matching the operating system and CPU from the latest
 [GitHub Release](https://github.com/gtvfx-envoy/envoy/releases).
 
-## Full Bundle (Recommended)
+## The Launcher (for Teams)
+
+On a team, install the [launcher](launcher.md) instead of a full bundle. It is a
+small program that reads one file on the team's share to learn which envoy
+version you should run, copies that version to your disk the first time, and
+runs it, so the whole team moves to a new version by editing that one file. Run
+the installer your administrator published on the share:
+
+```powershell
+& "$env:ENVOY_CONFIG_PROD\shim\install-envoy.ps1"
+```
+
+See [The Envoy Launcher](launcher.md) for what it does, and
+[Team Administration](team-administration.md) for setting it up.
+
+## Full Bundle
 
 | Platform | Archive |
 |---|---|
@@ -14,9 +29,13 @@ wheel matching the operating system and CPU from the latest
 | macOS Apple silicon | `envoy-v<version>-macos-aarch64.tar.gz` |
 
 Each archive contains `gt/envoy/<version>/bin`. Add that directory to `PATH`.
-The archive also carries the Python API in `py/`, and `.envoy/python_env.json`
-adds it to `PYTHONPATH` for commands that use the bundle, so `import envoy`
-works there without installing the wheel.
+The archive also carries the Python API in `py/`. The `envoy` in that
+directory adds `py/` to the end of `PYTHONPATH` for every command it launches,
+and sets `ENVOY_PYTHON_PATH` to it, so `import envoy` works without installing
+the wheel and without an envoy bundle in the stack. A copy of the API that the
+stack provides comes first and wins. Set `ENVOY_PYTHON_API=off` to leave
+`PYTHONPATH` alone. A build that is not laid out as a release, such as a
+developer build, adds nothing.
 
 === "Windows PowerShell"
 

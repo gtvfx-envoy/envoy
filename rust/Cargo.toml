@@ -1,9 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
+    "envoy-config",
     "envoy-core",
     "envoy-py",
     "envoy-cli",
+    "envoy-shim",
     "envoy-store",
 ]
 

@@ -42,7 +42,12 @@ impl Drop for ScratchDir {
 }
 
 fn base_command() -> Command {
-    let mut command = Command::cargo_bin("envoy").expect("envoy binary should build");
+    isolated(Command::cargo_bin("envoy").expect("envoy binary should build"))
+}
+
+/// `command` with every setting that could leak in from the machine running the
+/// tests taken away.
+fn isolated(mut command: Command) -> Command {
     command
         .env_remove("ENVOY_BNDL_ROOTS")
         .env_remove("ENVOY_STACK")
@@ -51,6 +56,7 @@ fn base_command() -> Command {
         .env_remove("ENVOY_CONFIG_ROOT")
         .env_remove("ENVOY_COMMANDS_FILE")
         .env_remove("ENVOY_ALLOWLIST")
+        .env_remove("ENVOY_PYTHON_API")
         .env_remove("ENVOY_TELEMETRY_ENABLED")
         .env_remove("ENVOY_TELEMETRY_ENDPOINT")
         .env_remove("ENVOY_TELEMETRY_REDACT_ARGS")
@@ -1735,4 +1741,167 @@ fn telemetry_redacts_secret_looking_arguments_before_export() {
         "telemetry payload must never contain the raw secret value:\n{contents}"
     );
     assert!(contents.contains("REDACTED"));
+}
+
+/// A copy of the envoy executable laid out as a release is: `bin/envoy`, with
+/// the Python API unpacked in `py/` beside it.
+fn release_copy(root: &Path) -> PathBuf {
+    // Not `Command::cargo_bin`: where a target runner is configured (`cross`),
+    // that returns the runner script and passes the executable to it.
+    let built = Path::new(env!("CARGO_BIN_EXE_envoy"));
+    let exe = root
+        .join("bin")
+        .join(built.file_name().expect("the binary has a file name"));
+    fs::create_dir_all(root.join("bin")).expect("bin dir should be created");
+    fs::copy(built, &exe).expect("the binary should be copied");
+
+    let package = root.join("py").join("envoy");
+    fs::create_dir_all(&package).expect("package dir should be created");
+    fs::write(package.join("__init__.py"), "").expect("package should be written");
+    exe
+}
+
+/// Writes a checkout bundle whose `probe` command prints `PYTHONPATH` and
+/// `ENVOY_PYTHON_PATH`, each on a line of its own.
+fn write_python_probe(bundle_root: &Path) {
+    let envoy_dir = bundle_root.join(".envoy");
+    fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
+    fs::create_dir_all(bundle_root.join("lib")).expect("lib dir should be created");
+    fs::create_dir_all(&envoy_dir).expect(".envoy dir should be created");
+
+    let script = if cfg!(windows) {
+        "probe.bat"
+    } else {
+        "probe.sh"
+    };
+    let body = if cfg!(windows) {
+        "@echo PYTHONPATH=%PYTHONPATH%\r\n@echo ENVOY_PYTHON_PATH=%ENVOY_PYTHON_PATH%\r\n"
+    } else {
+        "#!/bin/sh\necho \"PYTHONPATH=$PYTHONPATH\"\necho \"ENVOY_PYTHON_PATH=$ENVOY_PYTHON_PATH\"\n"
+    };
+    fs::write(bundle_root.join(script), body).expect("script should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bundle_root.join(script), fs::Permissions::from_mode(0o755))
+            .expect("script should be executable");
+    }
+
+    fs::write(
+        envoy_dir.join("commands.json"),
+        format!(
+            r#"{{"probe": {{"environment": ["probe_env.json"], "alias": ["${{__BUNDLE__}}/{script}"]}}}}"#
+        ),
+    )
+    .expect("commands.json should be written");
+    fs::write(
+        envoy_dir.join("probe_env.json"),
+        r#"{"PYTHONPATH": ["${__BUNDLE__}/lib"]}"#,
+    )
+    .expect("probe_env.json should be written");
+}
+
+/// What the probe printed for `name`.
+fn probed(assert: &assert_cmd::assert::Assert, name: &str) -> String {
+    let prefix = format!("{name}=");
+    let printed = stdout_text(assert);
+    printed
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe printed no {name} (exit status {}), stdout was:\n{printed}\nstderr was:\n{}",
+                assert.get_output().status,
+                stderr_text(assert)
+            )
+        })
+        .to_string()
+}
+
+/// The directories of a path list, however each is spelled.
+fn directories(list: &str) -> Vec<PathBuf> {
+    env::split_paths(list)
+        .map(|entry| fs::canonicalize(&entry).unwrap_or(entry))
+        .collect()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).expect("the path should exist")
+}
+
+#[test]
+fn a_release_gives_the_commands_it_launches_its_python_api() {
+    let scratch = ScratchDir::new("envoy_release_python_api");
+    let bundle = scratch.path().join("gt").join("probe");
+    write_python_probe(&bundle);
+    let app = scratch.path().join("app");
+    let envoy = release_copy(&app);
+    let run = |args: &[&str]| {
+        let mut command = isolated(Command::new(&envoy));
+        command.args(args).env("ENVOY_BNDL_ROOTS", scratch.path());
+        command
+    };
+    let api = canonical(&app.join("py"));
+
+    let launched = run(&["probe"]).assert().success();
+    assert_eq!(
+        directories(&probed(&launched, "PYTHONPATH")),
+        [canonical(&bundle.join("lib")), api.clone()],
+        "the stack's own entries come first"
+    );
+    assert_eq!(
+        canonical(Path::new(&probed(&launched, "ENVOY_PYTHON_PATH"))),
+        api
+    );
+
+    let traced = run(&["--trace", "PYTHONPATH", "probe"]).assert().success();
+    let stdout = stdout_text(&traced);
+    assert!(
+        stdout.contains("Added by this envoy"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ENVOY_PYTHON_API=off"),
+        "stdout was:\n{stdout}"
+    );
+
+    let opted_out = run(&["probe"])
+        .env("ENVOY_PYTHON_API", "off")
+        .assert()
+        .success();
+    assert_eq!(
+        directories(&probed(&opted_out, "PYTHONPATH")),
+        [canonical(&bundle.join("lib"))]
+    );
+    assert_eq!(probed(&opted_out, "ENVOY_PYTHON_PATH"), "");
+}
+
+#[test]
+fn a_build_that_is_not_a_release_adds_no_python_api() {
+    let scratch = ScratchDir::new("envoy_plain_build_python_api");
+    let bundle = scratch.path().join("gt").join("probe");
+    write_python_probe(&bundle);
+
+    let launched = base_command()
+        .arg("probe")
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .assert()
+        .success();
+
+    assert_eq!(
+        directories(&probed(&launched, "PYTHONPATH")),
+        [canonical(&bundle.join("lib"))]
+    );
+    assert_eq!(probed(&launched, "ENVOY_PYTHON_PATH"), "");
+
+    let traced = base_command()
+        .args(["--trace", "PYTHONPATH", "probe"])
+        .env("ENVOY_BNDL_ROOTS", scratch.path())
+        .assert()
+        .success();
+    assert!(
+        !stdout_text(&traced).contains("Added by this envoy"),
+        "stdout was:\n{}",
+        stdout_text(&traced)
+    );
 }

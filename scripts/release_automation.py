@@ -16,7 +16,14 @@ SEMVER_PATTERN = re.compile(
     r"(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
     r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
-WORKSPACE_PACKAGE_NAMES = {"envoy-cli", "envoy-core", "envoy-py", "envoy-store"}
+WORKSPACE_PACKAGE_NAMES = {
+    "envoy-cli",
+    "envoy-config",
+    "envoy-core",
+    "envoy-py",
+    "envoy-shim",
+    "envoy-store",
+}
 # Crates whose sources reach Envoy Utils: it depends on envoy-core, which depends on envoy-store.
 UTILS_REACHABLE_CRATES = ("envoy-core", "envoy-store")
 DIRECT_UTILS_APIS = (
