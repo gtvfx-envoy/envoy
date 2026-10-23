@@ -69,6 +69,10 @@ impl Machine {
     }
 
     fn run(&self, name: &str, arguments: &[&str]) -> Output {
+        self.run_script(&script(name), arguments)
+    }
+
+    fn run_script(&self, path: &Path, arguments: &[&str]) -> Output {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("powershell.exe");
             command.args([
@@ -83,7 +87,7 @@ impl Machine {
             Command::new("sh")
         };
         command
-            .arg(script(name))
+            .arg(path)
             .args(arguments)
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
@@ -165,6 +169,22 @@ fn the_launcher_is_installed_as_envoy_and_en() {
         fs::read_dir(machine.bin()).expect("bin is listed").count(),
         2
     );
+}
+
+#[test]
+fn an_installer_given_no_source_uses_the_folder_it_is_in() {
+    let machine = Machine::new();
+    let original = script("install-envoy");
+    let beside_the_launcher = machine
+        .release
+        .join(original.file_name().expect("the script has a file name"));
+    fs::copy(&original, &beside_the_launcher).expect("script is copied");
+    let arguments: &[&str] = if cfg!(windows) { &["-NoPath"] } else { &[] };
+
+    let output = machine.run_script(&beside_the_launcher, arguments);
+
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(machine.bin().join(exe("envoy")).exists());
 }
 
 #[test]

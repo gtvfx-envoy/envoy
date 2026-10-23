@@ -42,7 +42,7 @@ Do not ask before deleting the cache.
 #>
 [CmdletBinding()]
 param(
-    [string]$Source = $PSScriptRoot,
+    [string]$Source,
     [ValidateSet('User', 'Machine')]
     [string]$Scope = 'User',
     [switch]$NoPath,
@@ -52,6 +52,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Set here, not as the parameter's default: Windows PowerShell 5.1 leaves $PSScriptRoot empty in a
+# default when the script is started with -File.
+if (-not $Source) { $Source = $PSScriptRoot }
 $Target = 'windows-x86_64'
 $LauncherNames = @('envoy.exe', 'en.exe')
 
