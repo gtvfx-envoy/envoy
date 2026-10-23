@@ -87,13 +87,15 @@ function Skip([string]$Note) { [pscustomobject]@{ Result = 'SKIP'; Note = $Note 
 $stackArguments = @()
 if ($Stack) { $stackArguments = @("-s=$Stack") }
 $root = if ($env:ENVOY_CONFIG_ROOT) { $env:ENVOY_CONFIG_ROOT } else { Join-Path $env:USERPROFILE '.envoy' }
+$programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+# Where install-envoy.ps1 puts the launcher: for the user, or for the machine with -Scope Machine.
+$installFolders = @((Join-Path $root 'bin'), (Join-Path $programFiles 'envoy\bin'))
 $pinned = $null
 
 Check 'envoy on PATH is the launcher' {
     $first = Get-Command envoy -All -CommandType Application | Select-Object -First 1
-    $expected = Join-Path $root 'bin'
     if (-not $first) { return Fail 'envoy is not on PATH; open a new terminal after installing' }
-    if ((Split-Path $first.Source) -ine $expected) { return Fail "the first envoy on PATH is $($first.Source), not the launcher in $expected" }
+    if ($installFolders -notcontains (Split-Path $first.Source)) { return Fail "the first envoy on PATH is $($first.Source), not the launcher in $($installFolders -join ' or ')" }
     $run = Invoke-Envoy @('--envoy-shim-version')
     if ($run.Code -ne 0) { return Fail "exit $($run.Code): $($run.Err)" }
     Pass $run.Out

@@ -46,7 +46,7 @@ failures are one line starting `envoy:` and use exit codes `64`, `69`, `70` and
 |---|---|
 | `no redirect file is configured. Set ENVOY_CONFIG_PROD ...` (78) | Set `ENVOY_CONFIG_PROD` to the team's config folder, or `ENVOY_REDIRECT_CONFIG` to a redirect file |
 | `the redirect file could not be used, and there is no saved copy ...` (78) | The file is missing, unreadable, or invalid, and this machine has never read a good one. The message lists each place tried and why. Check that the share is reachable and that `redirect.yaml` is in the folder `ENVOY_CONFIG_PROD` names |
-| `the redirect file could not be read (...); using the copy saved 3 hours ago` | Not an error. The share was unreachable or the file is broken, so the launcher used the last good copy it saved |
+| `the redirect file could not be used (...); using the copy saved 3 hours ago` | Not an error. The share was unreachable, or the file on it is invalid or too new for this launcher (the message says which), so the launcher used the last good copy it saved. The administrator can check the file with `--envoy-shim-validate-config` |
 | `envoy v0.8.0 is not cached and could not be found (looked in: ...)` (69) | The version is not on this machine and not on any source. The message says why each source was no good: an unset `${VAR}`, or no `bin/envoy` in the folder. Ask the administrator to publish it, or check that the share is reachable |
 | `'alice' is assigned to group 'x', which has no version` (78) | The redirect file names a group under `users` that has no entry under `versions` |
 | `the redirect file has no 'default' version, and 'bob' has no assignment` (78) | Users who are not listed need a `default` version; add one |

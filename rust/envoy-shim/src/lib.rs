@@ -62,46 +62,89 @@ pub(crate) struct Decision {
     pub group: String,
     pub version: String,
     pub overridden: bool,
-    pub loaded: source::Loaded,
+    /// The redirect file. `None` when `ENVOY_VERSION` names a version that is
+    /// already cached: the file is not needed then, so the share is not read.
+    pub loaded: Option<source::Loaded>,
     pub location: Location,
+}
+
+impl Decision {
+    /// Where the redirect file says to look for the app.
+    pub fn sources(&self) -> &[String] {
+        match &self.loaded {
+            Some(loaded) => loaded.redirect.sources.as_slice(),
+            None => &[],
+        }
+    }
 }
 
 pub(crate) fn decide(env: &dyn Fn(&str) -> Option<String>) -> Result<Decision, ShimError> {
     let location = settings::from_environment();
+    let user = identity::current_user(env);
+
+    if let Some(version) = forced_version(env)? {
+        // Naming a version is a way round the redirect file. The file is only
+        // read, to learn where to copy the version from, when it is not here yet.
+        let loaded = if app::cached(&version, &location).is_some() {
+            None
+        } else {
+            let loaded = load_redirect(env, &location).map_err(|error| {
+                ShimError::Redirect(format!(
+                    "{VERSION_VAR} names {version}, which is not cached here, and the redirect \
+file that says where to copy it from could not be used: {error}"
+                ))
+            })?;
+            Some(loaded)
+        };
+        return Ok(Decision {
+            user,
+            group: format!("(set by {VERSION_VAR})"),
+            version,
+            overridden: true,
+            loaded,
+            location,
+        });
+    }
+
+    let loaded = load_redirect(env, &location)?;
+    let resolution = loaded.redirect.resolve(&user)?;
+    Ok(Decision {
+        user,
+        group: resolution.group,
+        version: resolution.version,
+        overridden: false,
+        loaded: Some(loaded),
+        location,
+    })
+}
+
+/// The version named by `ENVOY_VERSION`, if it is set.
+fn forced_version(env: &dyn Fn(&str) -> Option<String>) -> Result<Option<String>, ShimError> {
+    let Some(version) = env(VERSION_VAR)
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !is_safe_version(&version) {
+        return Err(ShimError::Redirect(format!(
+            "{VERSION_VAR} is '{version}', which is not a safe version name"
+        )));
+    }
+    Ok(Some(version))
+}
+
+/// Read the redirect file, or the copy saved from the last good one.
+pub(crate) fn load_redirect(
+    env: &dyn Fn(&str) -> Option<String>,
+    location: &Location,
+) -> Result<source::Loaded, ShimError> {
     let timeout = env(TIMEOUT_VAR)
         .and_then(|millis| millis.trim().parse::<u64>().ok())
         .map_or(source::DEFAULT_TIMEOUT, Duration::from_millis);
     // Without caching there is no cached app to fall back on, so no copy of the file is kept.
     let snapshots = location.enabled.then(|| location.root.join("snapshots"));
-    let loaded = source::load(env, snapshots.as_deref(), timeout)?;
-    let user = identity::current_user(env);
-
-    let forced = env(VERSION_VAR)
-        .map(|version| version.trim().to_string())
-        .filter(|version| !version.is_empty());
-    let (group, version, overridden) = match forced {
-        Some(version) => {
-            if !is_safe_version(&version) {
-                return Err(ShimError::Redirect(format!(
-                    "{VERSION_VAR} is '{version}', which is not a safe version name"
-                )));
-            }
-            (format!("(set by {VERSION_VAR})"), version, true)
-        }
-        None => {
-            let resolution = loaded.redirect.resolve(&user)?;
-            (resolution.group, resolution.version, false)
-        }
-    };
-
-    Ok(Decision {
-        user,
-        group,
-        version,
-        overridden,
-        loaded,
-        location,
-    })
+    source::load(env, snapshots.as_deref(), timeout)
 }
 
 /// Start envoy with `args`: resolve the version, make it runnable, hand over.
@@ -116,23 +159,29 @@ fn forward(args: &[OsString], env: &dyn Fn(&str) -> Option<String>) -> i32 {
         return launch::launch(&locked, args, float.as_deref());
     }
 
-    let decision = match decide(env) {
+    let decision = decide(env);
+    // Whatever came of the redirect file, now is the time to look for a newer
+    // launcher: a file written for a newer launcher than this one is exactly
+    // when an update is needed.
+    update::maybe_update(env);
+    let decision = match decision {
         Ok(decision) => decision,
         Err(error) => return fail(&error),
     };
-    if let source::Origin::Snapshot { age, reason, .. } = &decision.loaded.origin {
+    if let Some(source::Loaded {
+        origin: source::Origin::Snapshot { age, reason, .. },
+        ..
+    }) = &decision.loaded
+    {
         eprintln!(
-            "envoy: the redirect file could not be read ({reason}); using the copy saved {} ago",
+            "envoy: the redirect file could not be used ({reason}); using the copy saved {} ago",
             how_long(*age)
         );
-    } else {
-        // The share answered a moment ago, so this is a good time to ask about a newer launcher.
-        update::maybe_update(env);
     }
 
     let app = match app::ensure(
         &decision.version,
-        &decision.loaded.redirect.sources,
+        decision.sources(),
         env,
         &decision.location,
         &ProgressPrinter::new(),

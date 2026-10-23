@@ -48,8 +48,11 @@ const SCHEMA: u32 = 1;
 /// How long copying the new launcher, or trying it out, may take before giving up.
 const WORK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A staging folder this old was left behind by an update that never finished.
-const STALE_STAGING: Duration = Duration::from_secs(60 * 60);
+/// A lock this old was left by a launch that was killed part way through.
+const STALE_LOCK: Duration = Duration::from_secs(10 * 60);
+
+/// Held, in `<config root>/shim`, while the launcher is updated or tidied.
+const LOCK: &str = "update.lock";
 
 const STAGING: &str = ".update";
 
@@ -103,7 +106,7 @@ fn installed_in(exe: &Path, config_root: &Path) -> Option<PathBuf> {
 }
 
 /// Look for a newer launcher if this one is installed, updating is on, and none
-/// was looked for in the last day.
+/// was looked for in the last day. Also clears away what an earlier update left.
 pub fn maybe_update(env: &dyn Fn(&str) -> Option<String>) {
     if switched_off(env) {
         return;
@@ -112,22 +115,29 @@ pub fn maybe_update(env: &dyn Fn(&str) -> Option<String>) {
     let Some(dir) = installed_dir(&root) else {
         return;
     };
-    cleanup(&dir);
-
     let state = root.join("shim");
     let stamp = state.join(STAMP);
-    if modified_within(&stamp, INTERVAL) {
+    let share = env(CONFIG_ROOT_VAR).filter(|value| !value.trim().is_empty());
+
+    let due = share.is_some() && !modified_within(&stamp, INTERVAL);
+    if !due && !has_leftovers(&dir) {
         return;
     }
-    let Some(share) = env(CONFIG_ROOT_VAR).filter(|value| !value.trim().is_empty()) else {
+
+    // One launch at a time: a launch that finds the lock taken leaves the work
+    // to the one that holds it.
+    let Some(_lock) = Lock::try_acquire(&state) else {
+        return;
+    };
+    cleanup(&dir);
+
+    // Looked at again, now that no other launch can be about to do the same.
+    let Some(share) = share.filter(|_| !modified_within(&stamp, INTERVAL)) else {
         return;
     };
 
     // Recorded before trying, so a failure is not repeated by every launch.
-    if fs::create_dir_all(&state)
-        .and_then(|()| fs::write(&stamp, b""))
-        .is_err()
-    {
+    if fs::write(&stamp, b"").is_err() {
         return;
     }
     if let Ok(Outcome::Updated { to, .. }) = update(Path::new(&share), &dir) {
@@ -154,7 +164,12 @@ pub fn run_now(env: &dyn Fn(&str) -> Option<String>) -> i32 {
     };
 
     let state = root.join("shim");
-    let _ = fs::create_dir_all(&state).and_then(|()| fs::write(state.join(STAMP), b""));
+    let Some(_lock) = Lock::try_acquire(&state) else {
+        println!("Another launch is updating the launcher right now; try again in a moment.");
+        return 0;
+    };
+    cleanup(&dir);
+    let _ = fs::write(state.join(STAMP), b"");
     match update(Path::new(&share), &dir) {
         Ok(Outcome::Current(version)) => println!("The launcher is current ({version})."),
         Ok(Outcome::Updated { from, to }) => {
@@ -339,21 +354,74 @@ fn make_executable(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Remove what an earlier swap or a stopped update left in the install folder.
-fn cleanup(dir: &Path) {
+/// What an earlier swap or a stopped update may have left in the install folder.
+fn leftovers(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
     for stem in ["envoy", "en"] {
         for suffix in [".old", ".new"] {
-            let _ = fs::remove_file(beside(&dir.join(exe_name(stem)), suffix));
+            found.push(beside(&dir.join(exe_name(stem)), suffix));
         }
     }
-    let staging = dir.join(STAGING);
-    let stale = fs::metadata(&staging)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|when| SystemTime::now().duration_since(when).ok())
-        .is_some_and(|age| age > STALE_STAGING);
-    if stale {
-        let _ = fs::remove_dir_all(&staging);
+    found.push(dir.join(STAGING));
+    found
+}
+
+fn has_leftovers(dir: &Path) -> bool {
+    leftovers(dir)
+        .iter()
+        .any(|path| fs::symlink_metadata(path).is_ok())
+}
+
+/// Remove what an earlier swap or a stopped update left in the install folder.
+///
+/// Only while holding the [`Lock`]: with it, nothing found here belongs to an
+/// update still under way. (On Windows the launcher that swapped itself is
+/// still running as `envoy.exe.old` and cannot be deleted yet; a later launch
+/// finds it gone.)
+fn cleanup(dir: &Path) {
+    for path in leftovers(dir) {
+        if path.file_name().is_some_and(|name| name == STAGING) {
+            let _ = fs::remove_dir_all(&path);
+        } else {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Held while the launcher is updated or tidied, so that two launches starting
+/// together do not both swap it, and one never removes what another is part
+/// way through installing.
+struct Lock(PathBuf);
+
+impl Lock {
+    /// Take the lock, or return `None` when another launch holds it.
+    fn try_acquire(state: &Path) -> Option<Self> {
+        fs::create_dir_all(state).ok()?;
+        let path = state.join(LOCK);
+        // The second try is for a lock cleared away because its holder was killed.
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Some(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if modified_within(&path, STALE_LOCK) {
+                        return None;
+                    }
+                    let _ = fs::remove_file(&path);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -573,8 +641,11 @@ mod tests {
     }
 
     #[test]
-    fn leftovers_are_cleaned_up_but_a_fresh_staging_folder_is_not() {
+    fn leftovers_are_noticed_and_cleaned_up() {
         let dir = tempdir().expect("tempdir is created");
+        fs::write(dir.path().join(exe_name("envoy")), "launcher").expect("launcher is written");
+        assert!(!has_leftovers(dir.path()), "a tidy folder has none");
+
         for stem in ["envoy", "en"] {
             for suffix in [".old", ".new"] {
                 fs::write(beside(&dir.path().join(exe_name(stem)), suffix), "x")
@@ -582,6 +653,7 @@ mod tests {
             }
         }
         fs::create_dir(dir.path().join(STAGING)).expect("staging is created");
+        assert!(has_leftovers(dir.path()));
 
         cleanup(dir.path());
 
@@ -589,6 +661,50 @@ mod tests {
             .expect("dir reads")
             .map(|entry| entry.expect("entry").file_name())
             .collect();
-        assert_eq!(left, vec![std::ffi::OsString::from(STAGING)]);
+        assert_eq!(left, vec![std::ffi::OsString::from(exe_name("envoy"))]);
+        assert!(!has_leftovers(dir.path()));
+    }
+
+    #[test]
+    fn only_one_launch_holds_the_lock_at_a_time() {
+        let state = tempdir().expect("tempdir is created");
+
+        let first = Lock::try_acquire(state.path()).expect("the lock is free");
+        assert!(
+            Lock::try_acquire(state.path()).is_none(),
+            "a second launch leaves the work to the first"
+        );
+
+        drop(first);
+        assert!(
+            Lock::try_acquire(state.path()).is_some(),
+            "the lock is free again once released"
+        );
+    }
+
+    #[test]
+    fn the_lock_is_made_where_it_does_not_yet_exist() {
+        let state = tempdir().expect("tempdir is created");
+        let nested = state.path().join("not").join("yet");
+
+        let lock = Lock::try_acquire(&nested).expect("the folder is created");
+
+        assert!(nested.join(LOCK).is_file());
+        drop(lock);
+        assert!(!nested.join(LOCK).exists(), "nothing is left behind");
+    }
+
+    #[test]
+    fn a_lock_left_by_a_launch_that_was_killed_is_taken_over() {
+        let state = tempdir().expect("tempdir is created");
+        let _killed = Lock::try_acquire(state.path()).expect("the lock is free");
+        let long_ago = SystemTime::now() - STALE_LOCK - Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(state.path().join(LOCK))
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("the lock is backdated");
+
+        assert!(Lock::try_acquire(state.path()).is_some());
     }
 }

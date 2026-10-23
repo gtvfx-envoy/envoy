@@ -59,6 +59,18 @@ impl App {
     }
 }
 
+/// The cached copy of `version` and its size, when the store holds a complete
+/// one. Nothing is read from the share, and no store is created.
+pub fn cached(version: &str, location: &Location) -> Option<(PathBuf, u64)> {
+    if !location.enabled {
+        return None;
+    }
+    let key = key_for(version).ok()?;
+    let store = Store::open_existing(&location.root).ok().flatten()?;
+    let state = store.lookup(&key)?;
+    Some((store.entry_path(&key), state.bytes))
+}
+
 /// Find the first source that holds `version` of the app.
 ///
 /// Each source is a template; the first whose directory holds the executable

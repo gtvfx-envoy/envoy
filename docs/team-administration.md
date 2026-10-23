@@ -82,6 +82,8 @@ It reports every problem at once and exits `78` if there is an error:
 - a user in a group that has no version, or listed twice;
 - keys it does not know (at run time these are only a warning, which `--envoy-shim-resolve` shows).
 
+Launchers care about most of these when they read the file. A file with a missing `schema`, `sources` or `default`, a source without `{version}`, an unsafe version name, or a user in a group that has no version is not kept as the last good copy, and launchers that have a good copy use that instead. A user listed twice and keys it does not know are for the publisher to tidy up; they harm nobody who reads the file.
+
 `--check-sources` also looks for every version the file pins on the sources and warns about any that is not there, which catches the usual mistake of pointing the team at a version nobody has published yet.
 
 ## Publishing a change
@@ -93,7 +95,7 @@ Copy-Item .\redirect.yaml "$env:ENVOY_CONFIG_PROD\redirect.yaml.tmp"
 Move-Item "$env:ENVOY_CONFIG_PROD\redirect.yaml.tmp" "$env:ENVOY_CONFIG_PROD\redirect.yaml" -Force
 ```
 
-The file is read each time envoy starts, so a change takes effect at everyone's next launch, and moving someone back is the same edit in reverse. If a file is ever unreadable or invalid, launchers fall back to the last good copy they saved. Do not use symbolic links: they behave differently on Windows clients.
+The file is read each time envoy starts, so a change takes effect at everyone's next launch, and moving someone back is the same edit in reverse. If a file on the share is ever unreadable, invalid, or written for a newer launcher, launchers use the last good copy they saved and say so, and nobody is moved to another version by a bad edit. Do not use symbolic links: they behave differently on Windows clients.
 
 ## Publishing an envoy version
 
@@ -122,17 +124,17 @@ From then on, installed launchers notice the new `current.json` within a day and
 
 ## Teams
 
-A team that needs its own pins sets `ENVOY_TEAM=<team>` on its machines. The launcher then looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first and falls back to the studio-wide `redirect.yaml` when the team has none. The launcher pointer in `shim/` is shared by everyone.
+A team that needs its own pins sets `ENVOY_TEAM=<team>` on its machines. The launcher then looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first and uses the studio-wide `redirect.yaml` only when the team has no file at all. A team file that is there but cannot be used (invalid, unreadable, or too new for the launcher) is never replaced by the studio-wide one: the team keeps its own last good copy, so a typo in the team's file cannot quietly move the team to the studio's version. The launcher pointer in `shim/` is shared by everyone.
 
 ## Emergencies
 
-- **One person is stuck on a bad version.** Put them in a group pinned to a good one, or have them run `ENVOY_VERSION=<version> envoy ...`, which ignores the redirect file.
+- **One person is stuck on a bad version.** Put them in a group pinned to a good one, or have them run `ENVOY_VERSION=<version> envoy ...`, which ignores the redirect file: a version that is already cached starts without reading the file or the share.
 - **A version has to be pulled.** Change `default` (and any group that uses it) in the redirect file. People who cached the bad version stop running it at their next launch, because the launcher asks the file each time.
 - **The share is down.** Nothing needs doing: launchers run from the redirect file they saved and the version they cached. Machines that never ran the pinned version cannot start it until the share is back, and say so.
 
 ## Shared and farm machines
 
-Install the launcher for everyone with `install-envoy.ps1 -Scope Machine` from an elevated prompt. All users of the machine then share one launcher, and each keeps their own cache of envoy versions and bundles under their own `~/.envoy`. A machine-wide launcher does not update itself; run the installer again to update it.
+Install the launcher for everyone with `install-envoy.ps1 -Scope Machine` from an elevated prompt. It is installed in `%ProgramFiles%\envoy\bin` and put at the front of the machine `PATH`; only administrators can write there, and the installer refuses a folder that anyone else could change (anything ordinary users could put in a folder on the machine `PATH` would run for administrators). All users of the machine then share one launcher, and each keeps their own cache of envoy versions and bundles under their own `~/.envoy`. A machine-wide launcher does not update itself; run the installer again to update it.
 
 ## Who can change what
 

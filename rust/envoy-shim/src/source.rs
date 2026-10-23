@@ -38,15 +38,35 @@ pub enum Origin {
 pub struct Loaded {
     pub redirect: Redirect,
     pub origin: Origin,
+    /// What is wrong with a file from the share that no saved copy could stand
+    /// in for. It is used all the same, for the people it still works for.
+    /// Empty for a good file and for a saved copy.
+    pub problems: Vec<String>,
+}
+
+/// The first file that exists but cannot be used as it is.
+struct Blocker {
+    /// Its place among the candidates.
+    index: usize,
+    /// The file and what is wrong with it, when it could at least be parsed.
+    flawed: Option<(Redirect, Vec<String>)>,
 }
 
 /// Read the redirect file from the share, or from the copy saved in
 /// `snapshot_dir` when the share cannot be used.
 ///
-/// A copy is saved whenever the share is read, and only rewritten when the
-/// file changed. The share is tried first even when a copy exists, so a change
-/// to the file takes effect at the next launch. With no `snapshot_dir`, as when
-/// caching is off, nothing is saved and there is nothing to fall back on.
+/// The candidates are tried in order, and only a file that is not there lets
+/// the next one have its turn. A file that is there but cannot be used (it
+/// does not parse, is written for a newer launcher, cannot be read, or would
+/// leave someone with no version) stops the search: a team whose own file is
+/// broken must not quietly run the studio's version. Its saved copy is used
+/// instead, and failing that the file itself, for those it still works for.
+///
+/// A copy is saved whenever a good file is read, and only rewritten when the
+/// file changed, so a bad edit never replaces the last good copy. The share is
+/// tried first even when a copy exists, so a change to the file takes effect at
+/// the next launch. With no `snapshot_dir`, as when caching is off, nothing is
+/// saved and there is nothing to fall back on.
 pub fn load(
     env: &dyn Fn(&str) -> Option<String>,
     snapshot_dir: Option<&Path>,
@@ -62,44 +82,97 @@ redirect.yaml, or ENVOY_REDIRECT_CONFIG to the file itself"
     }
 
     let mut problems = Vec::new();
-    for path in &candidates {
+    let mut blocker = None;
+    for (index, path) in candidates.iter().enumerate() {
         match read_with_timeout(path, timeout) {
             Ok(text) => match Redirect::parse(&text) {
                 Ok(redirect) => {
-                    // A copy is only a convenience, so failing to save one is not worth stopping for.
-                    if let Some(dir) = snapshot_dir {
-                        let _ = snapshot::save(dir, path, &text);
+                    let blocking = redirect.blocking_problems();
+                    if blocking.is_empty() {
+                        // A copy is only a convenience, so failing to save one is not worth stopping for.
+                        if let Some(dir) = snapshot_dir {
+                            let _ = snapshot::save(dir, path, &text);
+                        }
+                        return Ok(Loaded {
+                            redirect,
+                            origin: Origin::Share(path.clone()),
+                            problems: Vec::new(),
+                        });
                     }
-                    return Ok(Loaded {
-                        redirect,
-                        origin: Origin::Share(path.clone()),
+                    let messages: Vec<String> = blocking
+                        .into_iter()
+                        .map(|problem| problem.message)
+                        .collect();
+                    problems.push(format!("{}: {}", path.display(), messages.join("; ")));
+                    blocker = Some(Blocker {
+                        index,
+                        flawed: Some((redirect, messages)),
                     });
+                    break;
                 }
-                Err(error) => problems.push(format!("{}: {error}", path.display())),
+                Err(error) => {
+                    problems.push(format!("{}: {error}", path.display()));
+                    blocker = Some(Blocker {
+                        index,
+                        flawed: None,
+                    });
+                    break;
+                }
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 problems.push(format!("{}: not found", path.display()));
             }
-            Err(error) => problems.push(format!("{}: {error}", path.display())),
+            Err(error) => {
+                problems.push(format!("{}: {error}", path.display()));
+                blocker = Some(Blocker {
+                    index,
+                    flawed: None,
+                });
+                break;
+            }
         }
     }
 
-    for path in &candidates {
+    // With nothing in the way, every candidate has a saved copy to offer, best
+    // first. With a file in the way, only its own copy will do.
+    let order: Vec<usize> = match &blocker {
+        Some(blocker) => vec![blocker.index],
+        None => (0..candidates.len()).collect(),
+    };
+    for index in order {
+        let path = &candidates[index];
         let Some(saved) = snapshot_dir.and_then(|dir| snapshot::load(dir, path)) else {
             continue;
         };
-        if let Ok(redirect) = Redirect::parse(&saved.text) {
-            return Ok(Loaded {
-                redirect,
-                origin: Origin::Snapshot {
-                    source: path.clone(),
-                    age: SystemTime::now()
-                        .duration_since(saved.confirmed)
-                        .unwrap_or_default(),
-                    reason: problems.join("; "),
-                },
-            });
+        let Ok(redirect) = Redirect::parse(&saved.text) else {
+            continue;
+        };
+        if !redirect.blocking_problems().is_empty() {
+            continue;
         }
+        return Ok(Loaded {
+            redirect,
+            origin: Origin::Snapshot {
+                source: path.clone(),
+                age: SystemTime::now()
+                    .duration_since(saved.confirmed)
+                    .unwrap_or_default(),
+                reason: problems.join("; "),
+            },
+            problems: Vec::new(),
+        });
+    }
+
+    if let Some(Blocker {
+        index,
+        flawed: Some((redirect, messages)),
+    }) = blocker
+    {
+        return Ok(Loaded {
+            redirect,
+            origin: Origin::Share(candidates[index].clone()),
+            problems: messages,
+        });
     }
 
     let fallback = if snapshot_dir.is_some() {
@@ -252,6 +325,172 @@ mod tests {
         let error = load(&env(&[]), None, DEFAULT_TIMEOUT).expect_err("there is nowhere to look");
 
         assert!(error.to_string().contains("ENVOY_CONFIG_PROD"), "{error}");
+    }
+
+    const TEAM: &str = "schema: 1\nsources: ['/s/{version}']\nversions: {default: v2}\n";
+
+    /// A share holding the studio file and a team file, and the lookup that selects the team.
+    fn team_share() -> (
+        tempfile::TempDir,
+        PathBuf,
+        PathBuf,
+        impl Fn(&str) -> Option<String>,
+    ) {
+        let dir = tempdir().expect("tempdir is created");
+        let studio = dir.path().join("redirect.yaml");
+        let team = dir.path().join("rigging").join("redirect.yaml");
+        fs::create_dir_all(team.parent().expect("a parent")).expect("team folder is created");
+        fs::write(&studio, REDIRECT).expect("studio file is written");
+        fs::write(&team, TEAM).expect("team file is written");
+        let lookup = env(&[
+            ("ENVOY_CONFIG_PROD", dir.path().display().to_string()),
+            ("ENVOY_TEAM", "rigging".to_string()),
+        ]);
+        (dir, studio, team, lookup)
+    }
+
+    fn version_of(loaded: &Loaded) -> String {
+        loaded.redirect.resolve("anyone").expect("resolves").version
+    }
+
+    #[test]
+    fn a_broken_team_file_is_never_replaced_by_the_studio_file() {
+        let (dir, _, team, lookup) = team_share();
+        let snapshots = dir.path().join("snapshots");
+        let first = load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT).expect("the team file serves");
+        assert_eq!(version_of(&first), "v2");
+
+        fs::write(&team, "schema: 1\nversions: {default: [v2\n").expect("someone breaks it");
+        let second = load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT)
+            .expect("the team's last good copy serves");
+
+        match &second.origin {
+            Origin::Snapshot { source, reason, .. } => {
+                assert_eq!(source, &team);
+                assert!(reason.contains("rigging"), "{reason}");
+            }
+            other => panic!("expected the team's saved copy, got {other:?}"),
+        }
+        assert_eq!(version_of(&second), "v2", "not the studio's v1");
+
+        // A machine that never read the team file has nothing of the team's to use.
+        let error = load(
+            &lookup,
+            Some(&dir.path().join("elsewhere")),
+            DEFAULT_TIMEOUT,
+        )
+        .expect_err("the studio file is not a stand-in");
+        assert!(error.to_string().contains("rigging"), "{error}");
+        assert_eq!(error.exit_code(), crate::error::EXIT_CONFIG);
+    }
+
+    #[test]
+    fn a_team_file_that_cannot_be_read_does_not_fall_through_either() {
+        let (dir, _, team, lookup) = team_share();
+        let snapshots = dir.path().join("snapshots");
+        load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT).expect("the team file serves");
+
+        // A directory where the file was: it exists, but cannot be read as a file.
+        fs::remove_file(&team).expect("the file goes");
+        fs::create_dir(&team).expect("a folder takes its place");
+        let loaded =
+            load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT).expect("the saved copy serves");
+
+        assert!(matches!(loaded.origin, Origin::Snapshot { .. }));
+        assert_eq!(version_of(&loaded), "v2");
+    }
+
+    #[test]
+    fn a_studio_file_in_the_way_is_not_passed_over_for_a_stale_team_copy() {
+        let (dir, studio, team, lookup) = team_share();
+        let snapshots = dir.path().join("snapshots");
+        // Each file is read once, so each has a saved copy.
+        let without_team = env(&[("ENVOY_CONFIG_PROD", dir.path().display().to_string())]);
+        load(&without_team, Some(&snapshots), DEFAULT_TIMEOUT).expect("the studio file serves");
+        load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT).expect("the team file serves");
+
+        // The team's file is withdrawn and the studio file is broken.
+        fs::remove_file(&team).expect("the team file goes");
+        fs::write(&studio, "schema: 1\nversions: [broken\n").expect("the studio file breaks");
+        let loaded = load(&lookup, Some(&snapshots), DEFAULT_TIMEOUT)
+            .expect("the studio's last good copy serves");
+
+        assert!(matches!(&loaded.origin, Origin::Snapshot { source, .. } if *source == studio));
+        assert_eq!(version_of(&loaded), "v1");
+    }
+
+    #[test]
+    fn a_bad_edit_never_replaces_the_last_good_copy() {
+        let dir = tempdir().expect("tempdir is created");
+        let file = dir.path().join("redirect.yaml");
+        fs::write(&file, REDIRECT).expect("redirect is written");
+        let snapshots = dir.path().join("snapshots");
+        load(&explicit(&file), Some(&snapshots), DEFAULT_TIMEOUT).expect("first load");
+
+        // It parses, but would give everyone a version that is not a safe name.
+        let unusable = "schema: 1\nsources: ['/s/{version}']\nversions: {default: 'v1/x'}\n";
+        fs::write(&file, unusable).expect("someone edits it");
+        let loaded = load(&explicit(&file), Some(&snapshots), DEFAULT_TIMEOUT)
+            .expect("the last good copy serves");
+
+        match &loaded.origin {
+            Origin::Snapshot { reason, .. } => {
+                assert!(reason.contains("not a safe version name"), "{reason}");
+            }
+            other => panic!("expected the saved copy, got {other:?}"),
+        }
+        assert_eq!(version_of(&loaded), "v1");
+        let kept = snapshot::load(&snapshots, &file).expect("a copy is still saved");
+        assert_eq!(kept.text, REDIRECT, "the bad text was not saved over it");
+    }
+
+    #[test]
+    fn with_no_good_copy_a_file_with_problems_still_serves_those_it_works_for() {
+        let dir = tempdir().expect("tempdir is created");
+        let file = dir.path().join("redirect.yaml");
+        fs::write(
+            &file,
+            "schema: 1\nsources: ['/s/{version}']\nversions: {default: v1}\nusers: {alice: typo}\n",
+        )
+        .expect("redirect is written");
+        let snapshots = dir.path().join("snapshots");
+
+        let loaded = load(&explicit(&file), Some(&snapshots), DEFAULT_TIMEOUT)
+            .expect("the file is used anyway");
+
+        assert!(matches!(loaded.origin, Origin::Share(_)));
+        assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
+        assert!(
+            loaded.problems[0].contains("group 'typo'"),
+            "{:?}",
+            loaded.problems
+        );
+        assert_eq!(
+            loaded.redirect.resolve("bob").expect("bob is fine").version,
+            "v1"
+        );
+        assert!(loaded.redirect.resolve("alice").is_err(), "alice is not");
+        assert!(
+            snapshot::load(&snapshots, &file).is_none(),
+            "a file with problems is not kept as the last good copy"
+        );
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_and_has_no_copy_is_an_error() {
+        let dir = tempdir().expect("tempdir is created");
+        let file = dir.path().join("redirect.yaml");
+        fs::write(&file, "schema: 2\nsurprise: [this, is, new]\n").expect("redirect is written");
+
+        let error = load(
+            &explicit(&file),
+            Some(&dir.path().join("snapshots")),
+            DEFAULT_TIMEOUT,
+        )
+        .expect_err("nothing to go on");
+
+        assert!(error.to_string().contains("schema 2"), "{error}");
+        assert!(error.to_string().contains("no saved copy"), "{error}");
     }
 
     #[test]

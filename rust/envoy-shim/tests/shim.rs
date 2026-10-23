@@ -190,6 +190,14 @@ fn in_directory(path: &str, directory: &Path) -> bool {
     Path::new(path).starts_with(directory)
 }
 
+fn backdate(path: &Path, by: Duration) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now() - by))
+        .expect("the file is backdated");
+}
+
 #[test]
 fn each_user_runs_the_version_the_redirect_file_gives_them() {
     let studio = Studio::new(&["v1", "v2"]);
@@ -457,6 +465,286 @@ fn checking_sources_warns_about_a_version_nobody_published() {
         "{printed}"
     );
     assert!(!printed.contains("version v1 was not found"), "{printed}");
+}
+
+#[test]
+fn a_version_named_by_hand_that_is_cached_needs_neither_the_redirect_file_nor_the_share() {
+    let studio = Studio::new(&["v1"]);
+    studio.run("bob", &[]);
+    fs::remove_dir_all(&studio.share).expect("the share goes away");
+    fs::remove_dir_all(&studio.config).expect("the redirect file goes away");
+    let by_hand = |args: &[&str]| {
+        studio
+            .shim("bob")
+            .env_remove("ENVOY_CONFIG_PROD")
+            .env("ENVOY_VERSION", "v1")
+            .args(args)
+            .output()
+            .expect("the shim runs")
+    };
+
+    let output = by_hand(&[]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(in_directory(&started_from(&output), &studio.cache));
+    assert!(
+        stderr(&output).is_empty(),
+        "there is nothing to say, stderr was:\n{}",
+        stderr(&output)
+    );
+
+    let resolved = stdout(&by_hand(&["--envoy-shim-resolve"]));
+    assert!(resolved.contains("config:   not read"), "{resolved}");
+    assert!(resolved.contains("app:      cached at"), "{resolved}");
+}
+
+#[test]
+fn a_version_named_by_hand_that_is_not_cached_needs_the_redirect_file_to_say_where_it_is() {
+    let studio = Studio::new(&["v1"]);
+
+    let output = studio
+        .shim("bob")
+        .env_remove("ENVOY_CONFIG_PROD")
+        .env("ENVOY_VERSION", "v1")
+        .output()
+        .expect("the shim runs");
+
+    assert_eq!(output.status.code(), Some(78));
+    let message = stderr(&output);
+    assert!(
+        message.contains("ENVOY_VERSION names v1, which is not cached here"),
+        "{message}"
+    );
+    assert!(message.contains("ENVOY_CONFIG_PROD"), "{message}");
+}
+
+#[test]
+fn a_broken_team_file_keeps_the_team_on_its_last_good_version() {
+    let studio = Studio::new(&["v1", "v2"]);
+    let team_file = studio.config.join("rigging").join("redirect.yaml");
+    fs::create_dir_all(team_file.parent().expect("a parent")).expect("team folder is created");
+    fs::write(&team_file, REDIRECT.replace("default: v1", "default: v2"))
+        .expect("team file is written");
+    let as_team = || {
+        let mut command = studio.shim("bob");
+        command.env("ENVOY_TEAM", "rigging");
+        command.output().expect("the shim runs")
+    };
+
+    let first = as_team();
+    assert!(
+        started_from(&first).contains("v2"),
+        "the team's file pins v2"
+    );
+
+    fs::write(&team_file, "schema: 1\nversions: {default: [v2\n").expect("someone breaks it");
+    let second = as_team();
+
+    assert!(second.status.success(), "{}", stderr(&second));
+    assert!(
+        started_from(&second).contains("v2"),
+        "the studio's v1 must not stand in for the team's file"
+    );
+    assert!(
+        stderr(&second).contains("using the copy saved"),
+        "stderr was:\n{}",
+        stderr(&second)
+    );
+    assert!(started_from(&studio.run("bob", &[])).contains("v1"));
+}
+
+#[test]
+fn a_file_with_a_problem_still_serves_those_it_works_for() {
+    let studio = Studio::new(&["v1", "v2"]);
+    // `typo` is a group with no version, and nobody is given a default.
+    fs::write(
+        studio.config.join("redirect.yaml"),
+        "schema: 1\nsources:\n  - ${STUDIO_SHARE}/envoy/{version}\nversions:\n  preview: v2\n\
+users:\n  alice: preview\n  carol: typo\n",
+    )
+    .expect("the file is republished");
+
+    let alice = studio.run("alice", &["--envoy-shim-resolve"]);
+    assert!(alice.status.success(), "{}", stderr(&alice));
+    let printed = stdout(&alice);
+    assert!(printed.contains("version:  v2"), "{printed}");
+    assert!(
+        printed.contains("warning:  the redirect file has a problem:"),
+        "{printed}"
+    );
+
+    let carol = studio.run("carol", &[]);
+    assert_eq!(carol.status.code(), Some(78));
+    assert!(
+        stderr(&carol).contains("group 'typo'"),
+        "{}",
+        stderr(&carol)
+    );
+    let bob = studio.run("bob", &[]);
+    assert_eq!(bob.status.code(), Some(78));
+    assert!(
+        stderr(&bob).contains("no 'default' version"),
+        "{}",
+        stderr(&bob)
+    );
+
+    // The file still says where to look, so a version can be fetched by name.
+    let prefetch = studio.run("bob", &["--envoy-shim-prefetch", "v1"]);
+    assert!(prefetch.status.success(), "{}", stderr(&prefetch));
+    assert!(stdout(&prefetch).contains("envoy v1 is ready (cached at"));
+
+    assert!(
+        !studio.cache.join("snapshots").exists(),
+        "a file with problems is not kept as the last good copy"
+    );
+}
+
+#[test]
+fn a_launcher_is_updated_even_when_the_redirect_file_is_for_a_newer_launcher() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    fs::write(
+        studio.config.join("redirect.yaml"),
+        "schema: 2\nsomething: new\n",
+    )
+    .expect("the file is republished");
+    studio.publish_launcher("v9.9.9");
+
+    let output = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    // Without a saved copy this launcher cannot say which version to run ...
+    assert_eq!(output.status.code(), Some(78));
+    let message = stderr(&output);
+    assert!(message.contains("schema 2"), "{message}");
+    // ... but it does find the launcher that can.
+    assert!(
+        message.contains("the launcher was updated to v9.9.9"),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read(&installed).expect("the launcher reads"),
+        fs::read(fake_shim()).expect("the stand-in reads")
+    );
+}
+
+#[test]
+fn with_a_saved_copy_a_newer_schema_runs_the_old_version_and_still_finds_the_update() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let first = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+    assert!(first.status.success(), "{}", stderr(&first));
+
+    // The team moves to a schema this launcher does not know and publishes the launcher that does.
+    fs::write(
+        studio.config.join("redirect.yaml"),
+        "schema: 2\nsomething: new\n",
+    )
+    .expect("the file is republished");
+    studio.publish_launcher("v9.9.9");
+    backdate(&studio.stamp(), Duration::from_secs(25 * 60 * 60));
+
+    let output = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        started_from(&output).contains("v1"),
+        "the saved copy still pins v1"
+    );
+    let message = stderr(&output);
+    assert!(message.contains("using the copy saved"), "{message}");
+    assert!(message.contains("schema 2"), "{message}");
+    assert!(
+        message.contains("the launcher was updated to v9.9.9"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_launch_does_not_update_while_another_holds_the_lock() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let original = fs::read(&installed).expect("the launcher reads");
+    studio.publish_launcher("v9.9.9");
+    let lock = studio.settings.join("shim").join("update.lock");
+    fs::create_dir_all(lock.parent().expect("a parent")).expect("state folder is created");
+    fs::write(&lock, b"").expect("another launch holds the lock");
+
+    let held = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    assert!(held.status.success(), "{}", stderr(&held));
+    assert_eq!(fs::read(&installed).expect("reads"), original);
+    assert!(
+        !studio.stamp().exists(),
+        "it left the looking to the other launch"
+    );
+    assert!(lock.exists(), "a lock that is not ours is left alone");
+
+    // A lock left by a launch that was killed does not stop updates for ever.
+    backdate(&lock, Duration::from_secs(11 * 60));
+    let stale = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    assert!(stale.status.success(), "{}", stderr(&stale));
+    assert_eq!(
+        fs::read(&installed).expect("reads"),
+        fs::read(fake_shim()).expect("the stand-in reads")
+    );
+    assert!(!lock.exists(), "released when the update was done");
+}
+
+#[test]
+fn leftovers_of_an_earlier_swap_are_cleared_by_the_next_launch() {
+    let studio = Studio::new(&["v1"]);
+    let installed = studio.install_shim();
+    let original = fs::read(&installed).expect("the launcher reads");
+    // Looked at today, so nothing is due: only the leftovers bring the launcher to the folder.
+    fs::create_dir_all(studio.settings.join("shim")).expect("state folder is created");
+    fs::write(studio.stamp(), b"").expect("the stamp is written");
+    let stems = if cfg!(windows) {
+        ["envoy.exe", "en.exe"]
+    } else {
+        ["envoy", "en"]
+    };
+    let mut leftovers = Vec::new();
+    for stem in stems {
+        for suffix in [".old", ".new"] {
+            let path = studio.bin().join(format!("{stem}{suffix}"));
+            fs::write(&path, "left behind").expect("leftover is written");
+            leftovers.push(path);
+        }
+    }
+    let staging = studio.bin().join(".update");
+    fs::create_dir_all(&staging).expect("staging is created");
+
+    let output = studio
+        .command(&installed, "bob")
+        .output()
+        .expect("the shim runs");
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    for path in leftovers {
+        assert!(!path.exists(), "{} was left", path.display());
+    }
+    assert!(!staging.exists());
+    assert_eq!(
+        fs::read(&installed).expect("reads"),
+        original,
+        "the launcher itself is untouched"
+    );
 }
 
 #[test]

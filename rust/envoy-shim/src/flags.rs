@@ -16,12 +16,13 @@ use std::ffi::OsString;
 use std::fs;
 
 use envoy_config::redirect::{is_safe_version, Redirect, Severity};
-use envoy_store::{format_bytes, ProgressPrinter, Store};
+use envoy_store::settings;
+use envoy_store::{format_bytes, ProgressPrinter};
 
 use crate::app::{self, Found};
 use crate::error::{EXIT_CONFIG, EXIT_USAGE};
 use crate::source::Origin;
-use crate::{decide, fail, how_long, update, VERSION};
+use crate::{decide, fail, how_long, load_redirect, update, VERSION, VERSION_VAR};
 
 /// What marks an argument as meant for the shim.
 pub const PREFIX: &str = "--envoy-shim-";
@@ -80,22 +81,32 @@ fn resolve(env: &dyn Fn(&str) -> Option<String>) -> i32 {
     println!("group:    {}{how}", decision.group);
     println!("version:  {}", decision.version);
 
-    match &decision.loaded.origin {
-        Origin::Share(path) => println!("config:   {}", path.display()),
-        Origin::Snapshot {
-            source,
-            age,
-            reason,
-        } => {
-            println!(
-                "config:   a copy of {}, saved {} ago ({reason})",
-                source.display(),
-                how_long(*age)
-            );
+    match &decision.loaded {
+        Some(loaded) => {
+            match &loaded.origin {
+                Origin::Share(path) => println!("config:   {}", path.display()),
+                Origin::Snapshot {
+                    source,
+                    age,
+                    reason,
+                } => {
+                    println!(
+                        "config:   a copy of {}, saved {} ago ({reason})",
+                        source.display(),
+                        how_long(*age)
+                    );
+                }
+            }
+            for problem in &loaded.problems {
+                println!("warning:  the redirect file has a problem: {problem}");
+            }
+            for key in &loaded.redirect.unknown_keys {
+                println!("warning:  the redirect file has an unknown key '{key}'");
+            }
         }
-    }
-    for key in &decision.loaded.redirect.unknown_keys {
-        println!("warning:  the redirect file has an unknown key '{key}'");
+        None => {
+            println!("config:   not read ({VERSION_VAR} names a version that is already cached)")
+        }
     }
 
     println!(
@@ -114,30 +125,16 @@ fn resolve(env: &dyn Fn(&str) -> Option<String>) -> i32 {
 
 /// Say where the pinned version is, or would be copied from.
 fn describe_app(decision: &crate::Decision, env: &dyn Fn(&str) -> Option<String>) {
-    let Ok(key) = app::key_for(&decision.version) else {
+    if let Some((path, bytes)) = app::cached(&decision.version, &decision.location) {
+        println!(
+            "app:      cached at {} ({})",
+            path.display(),
+            format_bytes(bytes)
+        );
         return;
-    };
-
-    if decision.location.enabled {
-        let cached = Store::open_existing(&decision.location.root)
-            .ok()
-            .flatten()
-            .and_then(|store| {
-                store
-                    .lookup(&key)
-                    .map(|state| (store.entry_path(&key), state))
-            });
-        if let Some((path, state)) = cached {
-            println!(
-                "app:      cached at {} ({})",
-                path.display(),
-                format_bytes(state.bytes)
-            );
-            return;
-        }
     }
 
-    match app::find_source(&decision.version, &decision.loaded.redirect.sources, env) {
+    match app::find_source(&decision.version, decision.sources(), env) {
         Ok(source) if decision.location.enabled => {
             println!(
                 "app:      not cached yet; it would be copied from {}",
@@ -223,34 +220,36 @@ fn prefetch(rest: &[OsString], env: &dyn Fn(&str) -> Option<String>) -> i32 {
         eprintln!("envoy: --envoy-shim-prefetch takes at most one version");
         return EXIT_USAGE;
     }
-    let decision = match decide(env) {
-        Ok(decision) => decision,
-        Err(error) => return fail(&error),
-    };
-    if !decision.location.enabled {
+    let location = settings::from_environment();
+    if !location.enabled {
         println!(
             "Caching is off (set by {}), so there is nothing to prefetch.",
-            decision.location.enabled_by
+            location.enabled_by
         );
         return 0;
     }
 
-    let version = rest.first().map_or_else(
-        || decision.version.clone(),
-        |v| v.to_string_lossy().into_owned(),
-    );
-    if !is_safe_version(&version) {
-        eprintln!("envoy: '{version}' is not a safe version name");
-        return EXIT_USAGE;
-    }
+    let (version, sources) = match rest.first() {
+        // A version named here needs only the places to look for it, not a
+        // version of its own for this user.
+        Some(version) => {
+            let version = version.to_string_lossy().into_owned();
+            if !is_safe_version(&version) {
+                eprintln!("envoy: '{version}' is not a safe version name");
+                return EXIT_USAGE;
+            }
+            match load_redirect(env, &location) {
+                Ok(loaded) => (version, loaded.redirect.sources),
+                Err(error) => return fail(&error),
+            }
+        }
+        None => match decide(env) {
+            Ok(decision) => (decision.version.clone(), decision.sources().to_vec()),
+            Err(error) => return fail(&error),
+        },
+    };
 
-    match app::ensure(
-        &version,
-        &decision.loaded.redirect.sources,
-        env,
-        &decision.location,
-        &ProgressPrinter::new(),
-    ) {
+    match app::ensure(&version, &sources, env, &location, &ProgressPrinter::new()) {
         Ok(app) => {
             let from = match &app.found {
                 Found::Cache(path) => format!("cached at {}", path.display()),

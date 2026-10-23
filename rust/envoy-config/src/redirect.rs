@@ -194,34 +194,47 @@ impl Redirect {
     /// Check the file the way a publisher should: everything that would make
     /// it fail or surprise a user.
     pub fn validate(&self) -> Vec<Problem> {
+        let mut problems = self.blocking_problems();
+        for user in &self.duplicate_users {
+            problems.push(error(format!("user '{user}' is listed more than once")));
+        }
+        for key in &self.unknown_keys {
+            problems.push(error(format!("unknown top-level key '{key}'")));
+        }
+        problems
+    }
+
+    /// The problems that stop the file working for some user.
+    ///
+    /// These are the errors of [`validate`](Redirect::validate) that matter
+    /// when the file is read. What only matters when it is published, a key
+    /// this crate does not know or a user listed twice, harms nobody who reads
+    /// it. A file with none of these problems gives every user a version, so it
+    /// is safe to keep as the last good copy.
+    pub fn blocking_problems(&self) -> Vec<Problem> {
         let mut problems = Vec::new();
-        let mut error = |message: String| {
-            problems.push(Problem {
-                severity: Severity::Error,
-                message,
-            });
-        };
+        let mut add = |message: String| problems.push(error(message));
 
         if self.sources.is_empty() {
-            error("there are no 'sources', so no version can be found".to_string());
+            add("there are no 'sources', so no version can be found".to_string());
         }
         for source in &self.sources {
             if !source.contains("{version}") {
-                error(format!("source '{source}' has no {{version}} placeholder"));
+                add(format!("source '{source}' has no {{version}} placeholder"));
             }
         }
 
         if !self.versions.contains_key(DEFAULT_GROUP) {
-            error(format!(
+            add(format!(
                 "'versions' has no '{DEFAULT_GROUP}', so users who are not listed get nothing"
             ));
         }
         for (group, version) in &self.versions {
             if group.trim().is_empty() {
-                error("'versions' has a group with no name".to_string());
+                add("'versions' has a group with no name".to_string());
             }
             if !is_safe_version(version) {
-                error(format!(
+                add(format!(
                     "group '{group}' is pinned to '{version}', which is not a safe version name \
 (use letters, digits, '.', '_', '+' and '-', at most {MAX_VERSION_LENGTH} characters)"
                 ));
@@ -230,22 +243,23 @@ impl Redirect {
 
         for (user, group) in &self.users {
             if user.is_empty() {
-                error("'users' has a user with no name".to_string());
+                add("'users' has a user with no name".to_string());
             }
             if !self.versions.contains_key(group) {
-                error(format!(
+                add(format!(
                     "user '{user}' is in group '{group}', which has no version"
                 ));
             }
         }
-        for user in &self.duplicate_users {
-            error(format!("user '{user}' is listed more than once"));
-        }
-        for key in &self.unknown_keys {
-            error(format!("unknown top-level key '{key}'"));
-        }
 
         problems
+    }
+}
+
+fn error(message: String) -> Problem {
+    Problem {
+        severity: Severity::Error,
+        message,
     }
 }
 
@@ -463,6 +477,44 @@ surprise: true\n",
         assert!(has("user 'alice' is listed more than once"), "{messages:?}");
         assert!(has("unknown top-level key 'surprise'"), "{messages:?}");
         assert!(messages.iter().all(|message| message.starts_with("error:")));
+    }
+
+    #[test]
+    fn only_what_breaks_a_user_blocks_a_file_from_being_kept() {
+        let harmless = Redirect::parse(
+            "schema: 1\nsources: ['/x/{version}']\nversions: {default: v1}\n\
+users: {alice: default, ALICE: default}\nhosts: {}\n",
+        )
+        .expect("parses");
+        assert!(
+            !harmless.validate().is_empty(),
+            "a publisher still hears of it"
+        );
+        assert_eq!(harmless.blocking_problems(), Vec::new());
+        assert_eq!(harmless.resolve("alice").expect("resolves").version, "v1");
+
+        for broken in [
+            "schema: 1\nsources: []\nversions: {default: v1}\n",
+            "schema: 1\nsources: ['/x/{version}']\nversions: {preview: v1}\n",
+            "schema: 1\nsources: ['/x/{version}']\nversions: {default: v1}\nusers: {bob: typo}\n",
+            "schema: 1\nsources: ['/x/{version}']\nversions: {default: 'v1/x'}\n",
+        ] {
+            let redirect = Redirect::parse(broken).expect("parses");
+            assert!(
+                !redirect.blocking_problems().is_empty(),
+                "{broken:?} must block"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_with_no_blocking_problems_resolves_for_every_user() {
+        let redirect = studio();
+        assert_eq!(redirect.blocking_problems(), Vec::new());
+
+        for user in ["alice", "bob", "carol", "", "CORP\\Nobody"] {
+            assert!(redirect.resolve(user).is_ok(), "{user:?}");
+        }
     }
 
     #[test]

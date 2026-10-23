@@ -16,8 +16,11 @@ the folder this script is in.
 
 .PARAMETER Scope
 User (the default) installs under %USERPROFILE%\.envoy and changes the user's PATH.
-Machine installs under %ProgramData%\envoy and changes the machine PATH; it needs an
-elevated prompt and suits shared or farm machines.
+Machine installs under %ProgramFiles%\envoy and changes the machine PATH; it needs an
+elevated prompt and suits shared or farm machines. Only administrators can write there,
+which matters: a folder on the machine PATH that ordinary users could write to would let
+them run their own programs as anyone who runs a command by name. The installer refuses a
+folder that anyone else can change.
 
 .PARAMETER NoPath
 Leave PATH alone.
@@ -54,12 +57,46 @@ $LauncherNames = @('envoy.exe', 'en.exe')
 
 function Get-InstallRoot {
     if ($Scope -eq 'Machine') {
-        if (-not $env:ProgramData) { throw 'ProgramData is not set.' }
-        return Join-Path $env:ProgramData 'envoy'
+        # The 64-bit folder, also from a 32-bit PowerShell. Unlike %ProgramData%, only administrators can write to it.
+        $programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+        if (-not $programFiles) { throw 'ProgramFiles is not set.' }
+        return Join-Path $programFiles 'envoy'
     }
     if ($env:ENVOY_CONFIG_ROOT) { return $env:ENVOY_CONFIG_ROOT }
     if (-not $env:USERPROFILE) { throw 'USERPROFILE is not set.' }
     return Join-Path $env:USERPROFILE '.envoy'
+}
+
+# Throws when anyone but SYSTEM, administrators and the installer service could change what is in $Folder.
+function Assert-OnlyAdministratorsCanWrite([string]$Folder) {
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $writing = $rights::WriteData -bor $rights::AppendData -bor $rights::Delete -bor
+        $rights::DeleteSubdirectoriesAndFiles -bor $rights::ChangePermissions -bor $rights::TakeOwnership
+    $trusted = @(
+        'S-1-5-18',      # SYSTEM
+        'S-1-5-32-544',  # Administrators
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'  # TrustedInstaller
+    )
+    $inheritOnly = [System.Security.AccessControl.PropagationFlags]::InheritOnly
+
+    $acl = Get-Acl -LiteralPath $Folder
+    $others = @()
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        if (($rule.FileSystemRights -band $writing) -eq 0) { continue }
+        if (($rule.PropagationFlags -band $inheritOnly) -ne 0) { continue }  # only for what is created inside
+        try { $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }
+        catch { $sid = [string]$rule.IdentityReference }
+        if ($trusted -notcontains $sid) { $others += [string]$rule.IdentityReference }
+    }
+
+    $owner = try { $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value } catch { '' }
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    if ($owner -and $trusted -notcontains $owner -and $owner -ne $currentUser) { $others += "the owner ($owner)" }
+
+    if ($others.Count -gt 0) {
+        throw "$Folder can be changed by $(($others | Select-Object -Unique) -join ', '). Anything they put there would run for administrators, so the launcher is not installed on the machine PATH. Remove the folder, or fix its permissions, and run this again."
+    }
 }
 
 function Assert-Administrator {
@@ -206,6 +243,11 @@ function Install-Launcher {
     if ($Scope -eq 'Machine') { Assert-Administrator }
     $bin = Join-Path (Get-InstallRoot) 'bin'
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
+    if ($Scope -eq 'Machine') {
+        # First on the machine PATH, a folder that others can write to would run their programs for administrators.
+        Assert-OnlyAdministratorsCanWrite (Split-Path $bin -Parent)
+        Assert-OnlyAdministratorsCanWrite $bin
+    }
 
     foreach ($name in $LauncherNames) {
         Install-File $launcher (Join-Path $bin $name)
@@ -257,6 +299,10 @@ function Uninstall-Launcher {
     if ((Test-Path -LiteralPath $bin) -and -not (Get-ChildItem -LiteralPath $bin -Force)) {
         Remove-Item -LiteralPath $bin -Force
     }
+    # A machine install owns its folder; a user's folder also holds their cache and settings.
+    if ($Scope -eq 'Machine' -and (Test-Path -LiteralPath $root) -and -not (Get-ChildItem -LiteralPath $root -Force)) {
+        Remove-Item -LiteralPath $root -Force
+    }
     Write-Host "Removed the envoy launcher from $bin"
 
     if (-not $NoPath) {
@@ -266,17 +312,22 @@ function Uninstall-Launcher {
     }
 
     if ($RemoveCache) {
-        $cache = Join-Path $root 'cache'
-        if (Test-Path -LiteralPath $cache) {
-            if (-not $Force) {
-                $answer = Read-Host "Delete the local cache $cache? [y/N]"
-                if ($answer -notmatch '^(y|yes)$') {
-                    Write-Host 'Kept the cache.'
-                    return
+        if ($Scope -eq 'Machine') {
+            Write-Host 'A machine-wide install keeps no cache. Each user has their own under ~\.envoy\cache; run this with -RemoveCache as that user.'
+        }
+        else {
+            $cache = Join-Path $root 'cache'
+            if (Test-Path -LiteralPath $cache) {
+                if (-not $Force) {
+                    $answer = Read-Host "Delete the local cache $cache? [y/N]"
+                    if ($answer -notmatch '^(y|yes)$') {
+                        Write-Host 'Kept the cache.'
+                        return
+                    }
                 }
+                Remove-Item -LiteralPath $cache -Recurse -Force
+                Write-Host "Deleted $cache"
             }
-            Remove-Item -LiteralPath $cache -Recurse -Force
-            Write-Host "Deleted $cache"
         }
     }
 }

@@ -35,7 +35,7 @@ Open a new terminal afterwards so `PATH` is picked up. Installing again replaces
 
 If PowerShell refuses to run a script that came from the internet, unblock it first with `Unblock-File`, or start it as `powershell -ExecutionPolicy Bypass -File <script>`. Launcher binaries are unsigned for now, so Windows may show a SmartScreen warning the first time one runs (see [Unsigned Artifact Notice](installation.md#unsigned-artifact-notice)).
 
-A shared or farm machine can install the launcher for every user with `-Scope Machine` from an elevated prompt (it goes to `%ProgramData%\envoy\bin` and the machine `PATH`). A machine-wide launcher does not update itself; run the installer again to update it.
+A shared or farm machine can install the launcher for every user with `-Scope Machine` from an elevated prompt. It goes to `%ProgramFiles%\envoy\bin`, which only administrators can write to, and to the front of the machine `PATH`. The installer refuses a folder that anyone else could change, because anything they put in a folder on the machine `PATH` would run for administrators. A machine-wide launcher does not update itself; run the installer again to update it.
 
 You can also install from an unpacked launcher archive (`envoy-shim-v<version>-<platform>`) instead of the share: run the installer script that is inside it. The archive holds the launcher, `install-envoy` and `uninstall-envoy` scripts for the platform, and the license. The Windows archive also holds `verify-launcher.ps1`, which runs envoy through a handful of checks (the launcher is the first `envoy` on `PATH`, the redirect file gives a version, envoy starts and keeps its exit codes, it still starts when the share is slow, and so on) and prints `PASS`, `FAIL` or `SKIP` for each:
 
@@ -50,9 +50,9 @@ The launcher is configured with environment variables. `ENVOY_CONFIG_PROD` is th
 | Variable | Effect |
 |---|---|
 | `ENVOY_CONFIG_PROD` | The team's config folder, which holds `redirect.yaml` and `shim/` |
-| `ENVOY_TEAM` | A team name. Looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first, then the studio-wide file |
+| `ENVOY_TEAM` | A team name. Looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first, and uses the studio-wide file only when the team has no file. A team file that is there but cannot be used is never replaced by the studio-wide one |
 | `ENVOY_REDIRECT_CONFIG` | A redirect file to use instead of looking for one. Takes precedence over the two above |
-| `ENVOY_VERSION` | Run this version, ignoring the redirect file, for one session or one command. For emergencies and testing |
+| `ENVOY_VERSION` | Run this version, ignoring the redirect file, for one session or one command. For emergencies and testing. A version that is already cached starts without reading the redirect file or the share; one that is not is copied from the first of the file's `sources` that has it |
 | `ENVOY_USER` | The name to look up in the redirect file, instead of your login name |
 | `ENVOY_SHIM_TIMEOUT_MS` | How long to wait for the share before using the saved copy of the redirect file (default `2000`) |
 | `ENVOY_SHIM_UPDATE` | `off` stops the launcher updating itself |
@@ -97,14 +97,16 @@ Everything after the version is chosen is envoy's own business. The launcher pas
 
 When the share cannot be reached, the launcher keeps working from what it has:
 
-- It uses the last copy of the redirect file it read (saved whenever it reads the share) and says so once: `envoy: the redirect file could not be read (...); using the copy saved 3 hours ago`.
+- It uses the last good copy of the redirect file it read (saved whenever it reads the share) and says so: `envoy: the redirect file could not be used (...); using the copy saved 3 hours ago`.
 - It runs the version you already have cached.
+
+The same happens when the file on the share is there but cannot be used: it does not parse, was written for a newer launcher than yours, or would leave someone with no version (no `default`, a user in a group that has no version, an unsafe version name). A copy is only ever saved from a file that works for everyone, so a bad edit on the share never replaces it. With no saved copy, a file that has such a problem is still used by the people it works for, and `envoy --envoy-shim-resolve` lists what is wrong.
 
 `envoy --envoy-shim-prefetch [VERSION]` copies a version ahead of time, for a laptop that is about to leave the network. If the version is not cached and the share is down, the launcher stops with a message that names the version and every place it looked.
 
 ## Updating the launcher
 
-The share's `shim/current.json` names the launcher version the team runs. About once a day, right after reading the redirect file, an installed launcher compares itself with that file. If they differ, it copies the published launcher next to itself, checks that the copy runs and reports the expected version, and replaces itself. The launch after that one is the new launcher; nothing needs restarting, and a failed update never stops a launch.
+The share's `shim/current.json` names the launcher version the team runs. About once a day, whenever a launch gets to the point of choosing a version (even if the redirect file turns out to be unusable: a file written for a newer launcher is exactly when an update is needed), an installed launcher compares itself with that file. If they differ, it copies the published launcher next to itself, checks that the copy runs and reports the expected version, and replaces itself. The launch after that one is the new launcher; nothing needs restarting, and a failed update never stops a launch. Launches that start at the same moment take turns, so the launcher is replaced once.
 
 Only a launcher installed in `~/.envoy/bin` updates itself, so a build run from a checkout is never replaced. `envoy --envoy-shim-update` looks right now and says what it found; `ENVOY_SHIM_UPDATE=off` turns updating off.
 
