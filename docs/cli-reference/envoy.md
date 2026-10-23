@@ -279,12 +279,17 @@ en -s R:/studio/studio.estack --list
 en --stack studio python script.py
 ```
 
+A stack that has run on this machine with caching on also starts when its share
+cannot be reached, from the bundles in the local cache (see
+[Bundle Caching](../caching.md#when-the-share-is-unreachable)).
+
 ### `--set-stack NAME_OR_PATH`
 
 Validate `NAME_OR_PATH` (the same way `--stack` would resolve it) and
 persist it as the `stack` user-config setting, then exit. Equivalent to
 `--set-config stack=VALUE`, but rejects a value that doesn't actually
-resolve instead of silently saving it:
+resolve instead of silently saving it. It needs the real stack, so a stack
+whose share is down is rejected even if it ran here before:
 
 ```powershell
 en --set-stack studio
@@ -308,6 +313,10 @@ List all named stacks discovered via `ENVOY_STACK_ROOTS`, then exit:
 ```powershell
 en --list-stacks
 ```
+
+When a stack root cannot be reached, the roots are named, followed by the
+stacks that have run on this machine and can still start without their share
+(see [Bundle Caching](../caching.md#when-the-share-is-unreachable)).
 
 ### `--commands-file` / `-c`
 

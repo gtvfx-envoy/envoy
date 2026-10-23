@@ -35,6 +35,21 @@ below.
 
 See [Bundle Caching](caching.md) for the whole picture.
 
+## The Share Is Unreachable
+
+A stack that has run on this machine with caching on starts without its share,
+from the bundles in the local cache ([how](caching.md#when-the-share-is-unreachable)).
+`en --diagnose` shows `from a snapshot` under the stack when that is what happened.
+
+| What you see | What it means |
+|---|---|
+| `envoy: the stack root ... cannot be reached; using stack 'studio' (...) as it was 3 hours ago` | Not an error. The share is down, so envoy used the stack as it was the last time a command ran with the share reachable. It is refreshed on the next run once the share is back |
+| `envoy: not cached on this machine, so unavailable: ext:pyside@...` | The stack lists bundles that were never copied here, so the commands that need them are missing until the share is back. Prepare a laptop beforehand with `en -s=studio --noop` |
+| `Stack "studio" is not available: ..., and no earlier run of it is remembered on this machine` | This machine has not run that stack with caching on (or `ENVOY_CACHE=off` is set), so it needs the share once. Check the name against `en --list-stacks` |
+| `... none of its bundles are cached on this machine (...)` | The stack ran here, but nothing of it is in the cache, usually because only listing commands ran or the cache was cleared. It needs the share once more |
+| `Named stack "studio" not found in ENVOY_STACK_ROOTS` with no "cannot be reached" | The share is reachable and does not publish that name. `en --list-stacks` shows what it does publish |
+| `... (the stack root ... cannot be reached)` after an error with caching off | `ENVOY_CACHE=off` (or `--cache off`) stops envoy using a remembered stack, so the share is needed |
+
 ## The Launcher Will Not Start Envoy
 
 `envoy --envoy-shim-resolve` shows which version you are pinned to, where the
