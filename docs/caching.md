@@ -6,11 +6,17 @@ Your own checkouts are never cached: a bundle without a `.bundle` marker always 
 
 ## What happens on the first run
 
+Bundles are copied up to four at a time, and the files of all of them share a fixed number of copy threads (16), so a stack with several large bundles does not wait for one before starting the next. Each bundle announces itself when it starts and again when it is done, and while any are copying, one line shows how far they have got:
+
 ```text
 envoy: caching ext:python@3.11.9-envoy.2 (5767 files, 140.4 MB) on first use...
-  ext:python@3.11.9-envoy.2: 46% (64.6 MB of 140.4 MB)
-envoy: cached ext:python@3.11.9-envoy.2 (140.4 MB) in 11.2 s
+envoy: caching ext:pyside@6.11.1-envoy.1 (3802 files, 637.2 MB) on first use...
+  2 bundles: 46% (358.2 MB of 777.6 MB)
+envoy: cached ext:python@3.11.9-envoy.2 (140.4 MB) in 7.5 s
+envoy: cached ext:pyside@6.11.1-envoy.1 (637.2 MB) in 7.6 s
 ```
+
+The progress line is rewritten in place on a terminal and gone when the copies finish. When output goes to a file or a log, it is a line per bundle every few seconds instead.
 
 - Only the bundles the command needs are copied: the bundle that defines the command, every bundle's `global_env.json`, and the bundles that supply an environment file the command loads. Listing or inspecting commands (`--list`, `--info`, `--which`, `--trace`, `--diagnose`) reads bundle metadata from the share and copies nothing.
 - A copy is built in a staging directory next to the cache and moved into place only when it is complete. Interrupting envoy (Ctrl+C, a crash, a lost connection) never leaves a partial bundle behind.
@@ -42,6 +48,7 @@ Keep the cache on a local disk. If the directory is on a network location (a UNC
 | `ENVOY_CACHE_ROOT` | Directory holding the cache |
 | `ENVOY_CACHE_MAX_IDLE_DAYS` | Days a bundle may go unused before it is removed. Default `30` |
 | `ENVOY_CACHE_MAX_SIZE` | Size the cache may grow to, such as `500GB`. Unset means no limit |
+| `ENVOY_CACHE_THREADS` | Files copied at once, from 1 to 64, shared by every bundle being copied. Default `16`. A share with high latency may fill faster with more, and a busy one may do better with fewer; an unusable value means the default |
 | `cache` user setting | `on` or `off`, set with `envoy --set-config cache=off` |
 | `bundle_cache_dir` user setting | Directory holding the cache, when `ENVOY_CACHE_ROOT` is not set |
 | `ENVOY_DISABLE_BUNDLE_CACHE=1` | Older way to turn caching off; `ENVOY_CACHE` takes precedence |

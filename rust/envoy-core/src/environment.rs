@@ -104,6 +104,7 @@ static ENVOY_ENV_VARS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "ENVOY_CACHE_MAX_IDLE_DAYS",
         "ENVOY_CACHE_MAX_SIZE",
         "ENVOY_CACHE_ROOT",
+        "ENVOY_CACHE_THREADS",
         "ENVOY_DISABLE_BUNDLE_CACHE",
         "ENVOY_STUDIO_ARTIFACTS",
         "ENVOY_STUDIO_ASSETS",

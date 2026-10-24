@@ -9,7 +9,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 pub use envoy_store::settings::{parse_switch, CACHE_ROOT_VAR, CACHE_SETTING, CACHE_VAR};
@@ -32,6 +34,14 @@ pub const CACHE_MAX_SIZE_VAR: &str = "ENVOY_CACHE_MAX_SIZE";
 
 /// Days of disuse before an entry is removed, unless configured otherwise.
 pub const DEFAULT_MAX_IDLE_DAYS: u64 = 30;
+
+/// Bundles copied into the store at once.
+///
+/// The files of every copy share one set of threads, so this does not raise the
+/// number of files in flight. It lets one bundle's directory walk and its many
+/// small files overlap another's large ones, which is where a first run spent
+/// its time when bundles went one after another.
+const PARALLEL_FILLS: usize = 4;
 
 /// Prune runs on an ordinary command at most this often.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -263,14 +273,60 @@ fn cache_published(
     store: &Store,
     observer: &dyn Observer,
 ) -> Vec<BundleInfo> {
-    bundles
+    in_parallel(bundles, PARALLEL_FILLS, |bundle| {
+        if published.contains(&bundle.root) {
+            cache_one(bundle, store, observer)
+        } else {
+            bundle
+        }
+    })
+}
+
+/// Run `work` on every item with up to `workers` at once, and return the
+/// results in the order the items came in.
+///
+/// An item that takes long does not hold up the ones behind it: each worker
+/// takes the next item as soon as it is free.
+fn in_parallel<T, R>(items: Vec<T>, workers: usize, work: impl Fn(T) -> R + Sync) -> Vec<R>
+where
+    T: Send,
+    R: Send,
+{
+    let workers = workers.min(items.len());
+    if workers <= 1 {
+        return items.into_iter().map(work).collect();
+    }
+
+    let waiting: Vec<Mutex<Option<T>>> = items
         .into_iter()
-        .map(|bundle| {
-            if published.contains(&bundle.root) {
-                cache_one(bundle, store, observer)
-            } else {
-                bundle
-            }
+        .map(|item| Mutex::new(Some(item)))
+        .collect();
+    let done: Vec<Mutex<Option<R>>> = waiting.iter().map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(slot) = waiting.get(index) else {
+                    break;
+                };
+                let item = slot
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                    .expect("each item is taken once");
+                let result = work(item);
+                *done[index].lock().unwrap_or_else(PoisonError::into_inner) = Some(result);
+            });
+        }
+    });
+
+    done.into_iter()
+        .map(|slot| {
+            slot.into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .expect("every item was worked on")
         })
         .collect()
 }
@@ -327,11 +383,7 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
     match store.ensure(&key, &bundle.root, observer) {
         Ok(ensured) => {
             if let Outcome::Filled { elapsed, bytes, .. } = ensured.outcome {
-                eprintln!(
-                    "envoy: cached {key} ({}) in {:.1} s",
-                    format_bytes(bytes),
-                    elapsed.as_secs_f64()
-                );
+                observer.cached(&key, bytes, elapsed);
             }
             hold(ensured.lease);
             Offered {
@@ -396,16 +448,23 @@ pub struct WarmReport {
 /// This is what `envoy --noop` and `envoy cache warm` do, so a first real run
 /// finds everything already local.
 pub fn warm(bundles: &[BundleInfo], store: &Store, observer: &dyn Observer) -> WarmReport {
-    let mut report = WarmReport::default();
-
-    for bundle in bundles {
-        if !is_published_bundle(&bundle.root) {
-            report
-                .not_cacheable
-                .push((bundle.bndlid(), NO_MARKER.to_string()));
-            continue;
+    let offers = in_parallel(bundles.to_vec(), PARALLEL_FILLS, |bundle| {
+        if is_published_bundle(&bundle.root) {
+            Ok(offer(bundle, store, observer))
+        } else {
+            Err(bundle.bndlid())
         }
-        let offered = offer(bundle.clone(), store, observer);
+    });
+
+    let mut report = WarmReport::default();
+    for offered in offers {
+        let offered = match offered {
+            Ok(offered) => offered,
+            Err(bndlid) => {
+                report.not_cacheable.push((bndlid, NO_MARKER.to_string()));
+                continue;
+            }
+        };
         match offered.result {
             Ok(Outcome::Hit) => report.already_cached += 1,
             Ok(Outcome::Filled { bytes, .. }) => {
@@ -753,6 +812,8 @@ fn prune_in_background(store: Store, settings: &CacheSettings) {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Condvar;
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1112,6 +1173,107 @@ server:/export /home nfs4 rw 0 0
         let second = warm(&bundles, &store, &envoy_store::Quiet);
         assert!(second.filled.is_empty(), "everything is already local");
         assert_eq!(second.already_cached, 4);
+    }
+
+    /// Holds every fill at its start until `wanted` fills have started, so a
+    /// test gets past that point only if the copies really overlap: a fill that
+    /// has to give up waiting means the others were not running with it.
+    struct Rendezvous {
+        wanted: usize,
+        started: Mutex<usize>,
+        arrived: Condvar,
+        gave_up: AtomicBool,
+    }
+
+    impl Rendezvous {
+        fn new(wanted: usize) -> Self {
+            Self {
+                wanted,
+                started: Mutex::new(0),
+                arrived: Condvar::new(),
+                gave_up: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl Observer for Rendezvous {
+        fn started(&self, _key: &EntryKey, _files: u64, _bytes: u64) {
+            let mut started = self.started.lock().expect("lock is held");
+            *started += 1;
+            self.arrived.notify_all();
+            let (_held, waited) = self
+                .arrived
+                .wait_timeout_while(started, Duration::from_secs(10), |started| {
+                    *started < self.wanted
+                })
+                .expect("lock is held");
+            if waited.timed_out() {
+                self.gave_up.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn bundles_are_copied_at_the_same_time_and_come_back_in_order() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let store = Store::open(temp.path().join("store")).expect("store opens");
+        let needed: HashSet<PathBuf> = bundles.iter().map(|bundle| bundle.root.clone()).collect();
+        let together = Rendezvous::new(3);
+
+        let cached = cache_bundles(bundles.clone(), &needed, &store, &together);
+
+        assert!(
+            !together.gave_up.load(Ordering::SeqCst),
+            "a bundle waited in vain for two others to be copied with it"
+        );
+        assert_eq!(cached.len(), bundles.len());
+        for (original, now) in bundles.iter().zip(&cached) {
+            assert_eq!(now.bndlid(), original.bndlid(), "the order is the stack's");
+            assert!(
+                now.root.starts_with(store.root()),
+                "{} is cached",
+                now.bndlid()
+            );
+        }
+    }
+
+    #[test]
+    fn a_bundle_that_cannot_be_copied_does_not_stop_the_others() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let store = Store::open(temp.path().join("store")).expect("store opens");
+        let published: HashSet<PathBuf> =
+            bundles.iter().map(|bundle| bundle.root.clone()).collect();
+        // Gone between being found and being copied, as when a share drops.
+        fs::remove_dir_all(&bundles[1].root).expect("a bundle is removed");
+
+        let cached = cache_published(bundles.clone(), &published, &store, &envoy_store::Quiet);
+
+        assert_eq!(
+            cached[1], bundles[1],
+            "the one that failed stays where it was"
+        );
+        for index in [0, 2, 3] {
+            assert!(
+                cached[index].root.starts_with(store.root()),
+                "{} is cached",
+                cached[index].bndlid()
+            );
+        }
+    }
+
+    #[test]
+    fn work_done_in_parallel_comes_back_in_the_order_it_was_given() {
+        // The earlier an item, the longer it takes, so the last finishes first.
+        let results = in_parallel((0..8_u64).collect(), 4, |n| {
+            thread::sleep(Duration::from_millis((8 - n) * 5));
+            n * 2
+        });
+        assert_eq!(results, [0, 2, 4, 6, 8, 10, 12, 14]);
+
+        assert_eq!(in_parallel(Vec::<u64>::new(), 4, |n| n), Vec::<u64>::new());
+        assert_eq!(in_parallel(vec![1_u64, 2, 3], 1, |n| n + 1), [2, 3, 4]);
     }
 
     #[test]
