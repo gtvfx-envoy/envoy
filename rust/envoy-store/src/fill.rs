@@ -4,6 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -12,11 +13,8 @@ use rayon::prelude::*;
 use crate::error::{io_error, Result, StoreError};
 use crate::key::EntryKey;
 use crate::observer::Observer;
+use crate::settings;
 use crate::state::STATE_DIR;
-
-/// Worker threads copying files at once. A network share is latency-bound, so
-/// several files in flight beat one fast stream.
-const COPY_THREADS: usize = 8;
 
 /// Attempts for one file, so a transient network hiccup does not fail a fill.
 const COPY_ATTEMPTS: u32 = 3;
@@ -127,13 +125,7 @@ pub(crate) fn copy_plan(
         create_link(&link.target, &staging.join(&link.relative))?;
     }
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(COPY_THREADS)
-        .build()
-        .map_err(|error| StoreError::Io {
-            path: staging.to_path_buf(),
-            source: io::Error::other(error),
-        })?;
+    let pool = copy_pool(staging)?;
 
     let copied = AtomicU64::new(0);
     let finished = AtomicBool::new(false);
@@ -159,6 +151,31 @@ pub(crate) fn copy_plan(
         finished.store(true, Ordering::Release);
         reporter.thread().unpark();
         outcome
+    })
+}
+
+/// The threads that copy files, started with the first fill and kept for the
+/// rest of the process.
+///
+/// Every fill shares them. A network share is latency-bound, so several files in
+/// flight beat one fast stream, and sharing keeps that number the same however
+/// many bundles are being copied together. `ENVOY_CACHE_THREADS` sets it.
+fn copy_pool(staging: &Path) -> Result<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<std::result::Result<rayon::ThreadPool, String>> = OnceLock::new();
+
+    POOL.get_or_init(|| {
+        let threads =
+            settings::copy_threads(std::env::var(settings::CACHE_THREADS_VAR).ok().as_deref());
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|index| format!("envoy-copy-{index}"))
+            .build()
+            .map_err(|error| error.to_string())
+    })
+    .as_ref()
+    .map_err(|message| StoreError::Io {
+        path: staging.to_path_buf(),
+        source: io::Error::other(message.clone()),
     })
 }
 

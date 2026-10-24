@@ -367,6 +367,7 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_CACHE_ROOT` | Directory holding the bundle cache (default `~/.envoy/cache`) |
 | `ENVOY_CACHE_MAX_IDLE_DAYS` | Days a cached bundle may go unused before it is removed (default `30`) |
 | `ENVOY_CACHE_MAX_SIZE` | Size the cache may grow to, such as `500GB`; the least recently used bundles are removed beyond it (default: no limit) |
+| `ENVOY_CACHE_THREADS` | Files copied into the cache at once, from 1 to 64, shared by every bundle being copied (default `16`; see [Bundle Caching](../caching.md#settings)) |
 | `ENVOY_BUNDLE_CACHE` | Older name for `ENVOY_CACHE_ROOT`; `ENVOY_CACHE_ROOT` takes precedence |
 | `ENVOY_DISABLE_BUNDLE_CACHE` | Older way to turn caching off (`1`/`true`/`yes`); `ENVOY_CACHE` takes precedence |
 | `ENVOY_DISABLE_DISCOVERY_CACHE` | Set to `1`/`true`/`yes` to force a fresh bundle-discovery scan, bypassing the on-disk discovery cache |
