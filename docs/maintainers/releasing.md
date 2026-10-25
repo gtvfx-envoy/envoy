@@ -291,7 +291,11 @@ assets (see [Release artifacts](build-chain.md#release-artifacts)).
 
 After publication, Envoy immediately dispatches an `envoy-released` event to
 Envoy Utils and Despatch. Each repository validates the event against the
-actual GitHub Release before acting.
+actual GitHub Release before acting. A pre-release (`0.8.0-alpha.N` or
+`0.8.0-rc.N`) is published as a GitHub pre-release and is not announced: the
+downstream repositories hear only about stable releases. To check a candidate
+against one of them anyway, replay the event by hand (see
+[Manual replay and failures](#manual-replay-and-failures)).
 
 ### 3. Review downstream impact
 
