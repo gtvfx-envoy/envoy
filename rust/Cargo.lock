@@ -541,7 +541,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "envoy-cli"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-config"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-core"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "age",
  "base64 0.22.1",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-py"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "envoy-cli",
  "envoy-core",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-shim"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "ctrlc",
  "envoy-config",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-store"
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 dependencies = [
  "fs4",
  "json_comments",
