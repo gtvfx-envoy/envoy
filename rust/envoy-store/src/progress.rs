@@ -185,6 +185,11 @@ impl Observer for ProgressPrinter {
             elapsed.as_secs_f64()
         ));
     }
+
+    fn warning(&self, message: &str) -> bool {
+        self.screen().say(&format!("envoy: warning: {message}"));
+        true
+    }
 }
 
 /// Format a byte count for people, such as `637.2 MB`.
@@ -354,6 +359,33 @@ mod tests {
             screen.last().map(String::as_str),
             Some("  ext:python@1.0.0: 10% (100 B of 1000 B)"),
             "nothing is left of '2 bundles: ...'"
+        );
+    }
+
+    #[test]
+    fn a_warning_has_a_line_of_its_own_while_other_copies_are_running() {
+        let (printer, capture) = printer(true);
+        let (python, pyside) = (key("python"), key("pyside"));
+
+        printer.started(&python, 10, 1000);
+        printer.started(&pyside, 20, 3000);
+        printer.progress(&pyside, 1500, 3000);
+        printer.finished(&python, Duration::from_secs(1));
+
+        assert!(
+            printer.warning("Could not cache ext:python@1.0.0: not enough free space"),
+            "the printer shows the message itself"
+        );
+
+        assert_eq!(
+            capture.screen(),
+            [
+                "envoy: caching ext:python@1.0.0 (10 files, 1000 B) on first use...",
+                "envoy: caching ext:pyside@1.0.0 (20 files, 2.9 KB) on first use...",
+                "envoy: warning: Could not cache ext:python@1.0.0: not enough free space",
+                "  ext:pyside@1.0.0: 50% (1.5 KB of 2.9 KB)",
+            ],
+            "the warning is not glued to the line for the copy still running"
         );
     }
 

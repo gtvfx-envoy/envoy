@@ -355,6 +355,16 @@ enum Stay {
     Failed(String),
 }
 
+/// Report a bundle that stays where it is.
+///
+/// An observer that draws progress shows the message itself, so it cannot land
+/// inside the line on screen while other copies run. Otherwise it is logged.
+fn warn(observer: &dyn Observer, bndlid: &str, message: String) {
+    if !observer.warning(&message) {
+        tracing::warn!(bundle_id = %bndlid, "{message}");
+    }
+}
+
 fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered {
     let bndlid = bundle.bndlid();
 
@@ -406,16 +416,22 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
                     "Not cached, loads from {}: {error}",
                     bundle.root.display()
                 ),
-                StoreError::PathTooLong { .. } => tracing::warn!(
-                    bundle_id = %bndlid,
-                    "Could not cache {key}, so it loads from {}: {error}. A shorter cache \
+                StoreError::PathTooLong { .. } => warn(
+                    observer,
+                    &bndlid,
+                    format!(
+                        "Could not cache {key}, so it loads from {}: {error}. A shorter cache \
                 directory, set with ENVOY_CACHE_ROOT, would fit it",
-                    bundle.root.display()
+                        bundle.root.display()
+                    ),
                 ),
-                _ => tracing::warn!(
-                    bundle_id = %bndlid,
-                    "Could not cache {key}, so it loads from {}: {error}",
-                    bundle.root.display()
+                _ => warn(
+                    observer,
+                    &bndlid,
+                    format!(
+                        "Could not cache {key}, so it loads from {}: {error}",
+                        bundle.root.display()
+                    ),
                 ),
             }
             Offered {
@@ -813,7 +829,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::sync::atomic::AtomicBool;
-    use std::sync::Condvar;
+    use std::sync::{Arc, Condvar};
 
     use serde_json::json;
     use tempfile::tempdir;
@@ -1260,6 +1276,91 @@ server:/export /home nfs4 rw 0 0
                 "{} is cached",
                 cached[index].bndlid()
             );
+        }
+    }
+
+    #[test]
+    fn a_bundle_listed_twice_is_cached_once_and_both_entries_come_back() {
+        let temp = tempdir().expect("tempdir is created");
+        let mut bundles = studio(temp.path());
+        // As when a root is listed twice, or two spellings name one bundle.
+        bundles.insert(1, bundles[0].clone());
+        let store = Store::open(temp.path().join("store")).expect("store opens");
+        let needed: HashSet<PathBuf> = bundles.iter().map(|bundle| bundle.root.clone()).collect();
+        let tally = Arc::new(Tally::default());
+
+        let (together, counts) = (bundles.clone(), Arc::clone(&tally));
+        let (sender, result) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(cache_bundles(together, &needed, &store, counts.as_ref()));
+        });
+        let cached = result
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a bundle listed twice must not leave a fill waiting on its own process");
+
+        assert_eq!(cached.len(), bundles.len());
+        assert_eq!(cached[0].root, cached[1].root, "both are the one entry");
+        assert_eq!(tally.started.load(Ordering::SeqCst), 4, "once per bundle");
+        assert_eq!(
+            tally.waited.load(Ordering::SeqCst),
+            0,
+            "no fill waited on another envoy, for there was none"
+        );
+    }
+
+    /// Remembers what a fill said, and says it is shown, as a printer does.
+    #[derive(Default)]
+    struct Said(Mutex<Vec<String>>);
+
+    impl Observer for Said {
+        fn warning(&self, message: &str) -> bool {
+            self.0
+                .lock()
+                .expect("lock is held")
+                .push(message.to_string());
+            true
+        }
+    }
+
+    #[test]
+    fn a_bundle_the_store_cannot_take_is_reported_through_the_observer() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let root = temp.path().join("store");
+        let store = Store::open(&root).expect("store opens");
+        // Fills are staged under .staging, which cannot be made while a file
+        // is in its place.
+        let staging = root.join(".staging");
+        let _ = fs::remove_dir_all(&staging);
+        fs::write(&staging, "in the way").expect("a file takes its place");
+        let said = Said::default();
+
+        let offered = offer(bundles[0].clone(), &store, &said);
+
+        assert!(matches!(offered.result, Err(Stay::Failed(_))));
+        assert_eq!(offered.bundle, bundles[0], "it stays where it was");
+        let said = said.0.into_inner().expect("lock is free");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("Could not cache gt:tool@1.0.0, so it loads from"),
+            "{said:?}"
+        );
+    }
+
+    /// Counts what fills report.
+    #[derive(Default)]
+    struct Tally {
+        started: AtomicUsize,
+        waited: AtomicUsize,
+    }
+
+    impl Observer for Tally {
+        fn waiting(&self, _key: &EntryKey) {
+            self.waited.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn started(&self, _key: &EntryKey, _files: u64, _bytes: u64) {
+            self.started.fetch_add(1, Ordering::SeqCst);
         }
     }
 

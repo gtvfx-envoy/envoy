@@ -132,7 +132,7 @@ A bundle runs from the share instead of the cache when:
 - **It has no `.bundle` marker.** The marker is what gives a bundle its identity and version. Bundles copied to the share by hand, without publishing them through `engit publish bundle`, have none.
 - **Its marker states no usable version.** A version must be made of letters, digits, `.`, `_`, `+`, and `-`.
 - **A path inside it is too long for Windows.** The longest path under the cache must stay within 250 characters. Envoy warns once, remembers the answer, and runs the bundle from the share without checking again; the note is forgotten when the cache is cleared or the bundle goes unused for the idle period. Pick a shorter cache directory with `ENVOY_CACHE_ROOT`, or publish the bundle with shorter paths. The default `C:\Users\<you>\.envoy\cache` leaves room for the largest bundles in a typical studio, but a much longer directory, such as one under `%TEMP%`, may not.
-- **There is not enough free space** on the drive holding the cache.
+- **There is not enough free space** on the drive holding the cache. Bundles copied together are counted together: one that would fit on its own waits for the copies ahead of it to finish, and is refused only if it no longer fits.
 - **The cache directory cannot be used**, for example because it is read-only.
 
 `envoy --diagnose` shows where the cache is, whether it is on, what turned it on or off, how much it holds, and beside each bundle whether it is `[cached]`, `[not cached yet]`, `[refused: ...]` or `[never cached: ...]` and why.

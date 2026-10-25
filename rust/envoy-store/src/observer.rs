@@ -22,6 +22,16 @@ pub trait Observer: Sync {
 
     /// A fill succeeded and the entry is ready: `bytes` were copied in `elapsed`.
     fn cached(&self, _key: &EntryKey, _bytes: u64, _elapsed: Duration) {}
+
+    /// Something went wrong that does not stop the run, such as a bundle that
+    /// could not be copied and so runs from where it is.
+    ///
+    /// Return `true` when the message was shown. The caller logs it otherwise.
+    /// An observer that draws on the screen shows it itself, so the message
+    /// cannot land inside what it has drawn while other copies are running.
+    fn warning(&self, _message: &str) -> bool {
+        false
+    }
 }
 
 /// An [`Observer`] that reports nothing.

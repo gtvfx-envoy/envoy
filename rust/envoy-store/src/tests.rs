@@ -1,14 +1,16 @@
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{mpsc, Arc, Barrier};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use tempfile::{tempdir, TempDir};
 
 use crate::refusal::{self, Refusal};
 use crate::{
-    EntryKey, Health, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError, STORE_FORMAT,
+    EntryKey, EntryState, Health, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError,
+    STORE_FORMAT,
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -265,6 +267,134 @@ fn concurrent_ensures_fill_an_entry_exactly_once() {
         304,
         "the entry must be complete, not a partial copy"
     );
+}
+
+/// Runs `work` on a thread of its own and gives it `limit` to finish, so a lock
+/// that is never granted fails the test instead of hanging it.
+fn within<T: Send + 'static>(limit: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, result) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    result
+        .recv_timeout(limit)
+        .expect("it did not finish: something waits for a lock that is never granted")
+}
+
+/// Does something when the first envoy starts waiting.
+struct WhenWaiting {
+    act: Box<dyn Fn() + Send + Sync>,
+    done: AtomicBool,
+}
+
+impl Observer for WhenWaiting {
+    fn waiting(&self, _key: &EntryKey) {
+        if !self.done.swap(true, Ordering::SeqCst) {
+            (self.act)();
+        }
+    }
+}
+
+/// Make `key` usable the way a finished fill does, without going through the
+/// store.
+fn publish_by_hand(store: &Store, key: &EntryKey) {
+    let entry = store.entry_path(key);
+    write(&entry.join("lib/one.py"), "one");
+    crate::state::write_state(
+        &entry,
+        &EntryState {
+            format: STORE_FORMAT,
+            complete: true,
+            bytes: 3,
+            files: 1,
+            source: String::new(),
+            filled_at: 0,
+            created_by: String::new(),
+        },
+    )
+    .expect("state is written");
+}
+
+#[test]
+fn an_envoy_waiting_to_fill_does_not_wait_for_a_lease_on_what_another_filled() {
+    let fixture = fixture();
+    let key = key("1.0.0");
+
+    // Another envoy found the entry missing, as this one did, and holds its lock.
+    let other = fixture.store.lock_for(&key).expect("lock opens");
+    assert!(other.try_shared().expect("lock is asked for"));
+
+    // It fills the entry while this envoy waits, then runs from it for as long
+    // as it likes, never giving up its hold on the lock.
+    let (store, published) = (fixture.store.clone(), key.clone());
+    let observer = Arc::new(WhenWaiting {
+        act: Box::new(move || publish_by_hand(&store, &published)),
+        done: AtomicBool::new(false),
+    });
+
+    let (store, source, wanted) = (fixture.store.clone(), fixture.source.clone(), key.clone());
+    let outcome = within(Duration::from_secs(10), move || {
+        store
+            .ensure(&wanted, &source, observer.as_ref())
+            .map(|ensured| ensured.outcome)
+    });
+
+    assert!(
+        matches!(outcome, Ok(Outcome::Hit)),
+        "the entry is there, so it is used as it is: {outcome:?}"
+    );
+    drop(other);
+}
+
+#[test]
+fn threads_asking_for_one_entry_fill_it_once_and_none_waits_on_another() {
+    let fixture = fixture();
+    for index in 0..300 {
+        write(
+            &fixture.source.join(format!("many/file_{index:03}.txt")),
+            "x",
+        );
+    }
+    let observer = Arc::new(Counting::default());
+
+    let (store, source, counts) = (
+        fixture.store.clone(),
+        fixture.source.clone(),
+        Arc::clone(&observer),
+    );
+    let held = within(Duration::from_secs(30), move || {
+        let (key, barrier) = (key("1.0.0"), Barrier::new(6));
+        // One store, shared as the threads of one envoy share it. Each result
+        // is kept, so every thread keeps its lease as a running command does.
+        thread::scope(|scope| {
+            let handles: Vec<_> = (0..6)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        store
+                            .ensure(&key, &source, counts.as_ref())
+                            .expect("ensure succeeds")
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("thread finishes"))
+                .collect::<Vec<_>>()
+        })
+    });
+
+    assert_eq!(observer.started.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        observer.waited.load(Ordering::SeqCst),
+        0,
+        "threads of one envoy take turns, so none is told to wait for another envoy"
+    );
+    let filled = held
+        .iter()
+        .filter(|ensured| matches!(ensured.outcome, Outcome::Filled { .. }))
+        .count();
+    assert_eq!(filled, 1, "one filled it and the rest used it");
 }
 
 #[test]

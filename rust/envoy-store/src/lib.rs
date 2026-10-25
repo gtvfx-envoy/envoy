@@ -24,6 +24,7 @@
 //! # }
 //! ```
 
+mod coordinate;
 mod error;
 mod fill;
 mod key;
