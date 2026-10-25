@@ -33,10 +33,35 @@ DIRECT_UTILS_APIS = (
 )
 
 
+# The stages of a release cycle: alpha.N while work heads for it, rc.N for a candidate, and no
+# stage for the release itself. They sort in that order.
+PRERELEASE_STAGES = re.compile(r"^(?:alpha|rc)\.[1-9]\d*$")
+
+
 def validateVersion(version: str) -> str:
-    """Validate and return an unprefixed semantic version."""
-    if not SEMVER_PATTERN.fullmatch(version):
+    """Validate and return an unprefixed release version.
+
+    A release version is ``X.Y.Z``, ``X.Y.Z-alpha.N`` or ``X.Y.Z-rc.N``. Build metadata is left to
+    builds, which add the commit they were built from.
+
+    Args:
+        version: Version without a ``v`` prefix.
+
+    Returns:
+        The version, unchanged.
+
+    Raises:
+        ValueError: If it is not a semantic version, or is not one a release may have.
+
+    """
+    match = SEMVER_PATTERN.fullmatch(version)
+    if match is None:
         raise ValueError(f"Invalid semantic version: {version!r}")
+    prerelease, metadata = match.group(4), match.group(5)
+    if metadata is not None:
+        raise ValueError(f"{version!r} carries build metadata, which only a build adds.")
+    if prerelease is not None and not PRERELEASE_STAGES.fullmatch(prerelease):
+        raise ValueError(f"{version!r} has a pre-release stage other than alpha.N or rc.N.")
     return version
 
 

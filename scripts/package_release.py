@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -13,6 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_version import checkReportedVersion  # noqa: E402
 
 # Substrings a wheel's file name must contain to belong to a target, so a wheel built for
 # another platform is never packaged by mistake. Unknown targets accept any wheel.
@@ -238,6 +242,10 @@ def main() -> int:
     options = parseArguments()
     binary_directory = options.binary_dir.resolve()
     output_directory = options.output_dir.resolve()
+    suffix = ".exe" if options.windows else ""
+    built = binary_directory / f"envoy{suffix}"
+    if built.is_file():
+        checkReportedVersion(built, options.version)
     wheel_path = None
     if not options.no_wheel:
         wheel_directory = (options.wheel_dir or output_directory).resolve()

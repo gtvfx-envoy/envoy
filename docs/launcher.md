@@ -91,6 +91,14 @@ envoy: caching app:envoy@v0.8.0 (9 files, 10.6 MB) on first use...
 
 Later runs start the cached copy straight away and do not read the version from the share at all. The launcher adds about 12 ms to a start. Cached versions that nothing has used for 30 days are removed, like cached bundles.
 
+The app is the authority on which version it is. When the launcher has just copied one, it asks it, once, with `envoy --version`. If the answer is not the version the app was published as, it says so and carries on:
+
+```text
+envoy: warning: the envoy published as v0.8.0-rc.1 reports itself as v0.7.0-51-g8ec805c. It runs anyway; ask whoever published it to check the version
+```
+
+A leading `v` and build metadata (`+g8ec805c`, which says which commit built it) are not part of the comparison. The check happens when the app is copied, so a start from the cache never pays for it and the message appears once on each machine.
+
 Everything after the version is chosen is envoy's own business. The launcher passes your arguments through untouched and ends with envoy's exit code; on Windows it ignores Ctrl+C itself so that envoy decides what to do, and on Linux and macOS it becomes envoy.
 
 ## Working offline

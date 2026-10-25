@@ -24,6 +24,7 @@ mod identity;
 mod launch;
 mod source;
 mod update;
+mod version;
 
 use std::ffi::OsString;
 use std::path::PathBuf;

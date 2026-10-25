@@ -266,6 +266,50 @@ fn the_first_run_copies_the_version_and_later_runs_do_not() {
 }
 
 #[test]
+fn an_app_that_reports_another_version_than_it_was_published_as_is_said_so_once() {
+    let studio = Studio::new(&["v1"]);
+    let run = |reported: &str| {
+        studio
+            .shim("bob")
+            .env("FAKE_APP_VERSION", reported)
+            .output()
+            .expect("the shim runs")
+    };
+
+    let first = run("v0.7.0-51-g8ec805c");
+    let second = run("v0.7.0-51-g8ec805c");
+
+    assert!(first.status.success(), "it still runs: {}", stderr(&first));
+    assert!(
+        stderr(&first).contains("published as v1 reports itself as v0.7.0-51-g8ec805c"),
+        "stderr was:\n{}",
+        stderr(&first)
+    );
+    assert!(
+        !stderr(&second).contains("reports itself"),
+        "it is said when the app is copied, not at every start:\n{}",
+        stderr(&second)
+    );
+}
+
+#[test]
+fn build_metadata_does_not_make_a_version_another_version() {
+    let studio = Studio::new(&["v1"]);
+
+    let output = studio
+        .shim("bob")
+        .env("FAKE_APP_VERSION", "1+g8ec805c")
+        .output()
+        .expect("the shim runs");
+
+    assert!(
+        !stderr(&output).contains("reports itself"),
+        "stderr was:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn a_cached_version_still_runs_with_the_share_and_the_redirect_file_gone() {
     let studio = Studio::new(&["v1"]);
     studio.run("bob", &[]);

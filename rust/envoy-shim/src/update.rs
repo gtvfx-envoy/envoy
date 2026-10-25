@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 use crate::error::{EXIT_CONFIG, EXIT_UNAVAILABLE};
 use crate::source::{read_with_timeout, within, DEFAULT_TIMEOUT};
+use crate::version::same_version;
 use crate::{how_long, VERSION};
 
 /// `off`, `false`, `no` or `0` stops the launcher updating itself.
@@ -440,12 +441,6 @@ fn modified_within(path: &Path, interval: Duration) -> bool {
         .is_some_and(|age| age < interval)
 }
 
-/// Whether two version names are the same release, whether or not they start with `v`.
-fn same_version(left: &str, right: &str) -> bool {
-    let bare = |version: &str| version.trim().trim_start_matches(['v', 'V']).to_string();
-    bare(left) == bare(right)
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -457,14 +452,6 @@ mod tests {
         fs::create_dir_all(share.path().join("shim")).expect("shim folder is created");
         fs::write(share.path().join("shim").join(POINTER), contents).expect("pointer is written");
         share
-    }
-
-    #[test]
-    fn versions_are_the_same_release_with_or_without_a_v() {
-        assert!(same_version("v0.8.0", "0.8.0"));
-        assert!(same_version(" v0.8.0\n", "v0.8.0"));
-        assert!(!same_version("v0.8.0", "v0.8.1"));
-        assert!(!same_version("v0.8.0-3-gabc", "v0.8.0"));
     }
 
     #[test]
