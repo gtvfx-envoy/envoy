@@ -2,10 +2,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::coordinate::{Coordinator, Promise};
 use crate::error::{io_error, Result, StoreError};
 use crate::fill;
 use crate::key::EntryKey;
@@ -38,6 +41,9 @@ const SPACE_HEADROOM: u64 = 64 * 1024 * 1024;
 const WINDOWS_PATH_LIMIT: usize = 250;
 /// Times `ensure` will start over when an entry is removed under it.
 const ENSURE_ATTEMPTS: u32 = 3;
+
+/// How often an envoy waiting on another's lock asks again.
+const LOCK_POLL: Duration = Duration::from_millis(50);
 
 static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -185,6 +191,8 @@ pub struct Verdict {
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
+    /// Shared by clones, so every thread using this store is coordinated.
+    coordinator: Arc<Coordinator>,
 }
 
 impl Store {
@@ -217,7 +225,10 @@ impl Store {
             Err(error) => return Err(io_error(&marker_path)(error)),
         }
 
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            coordinator: Arc::default(),
+        })
     }
 
     /// Open the store at `root` only if it already exists.
@@ -261,7 +272,7 @@ impl Store {
         self.refused_dir().join(key.refusal_file_name())
     }
 
-    fn lock_for(&self, key: &EntryKey) -> Result<LockFile> {
+    pub(crate) fn lock_for(&self, key: &EntryKey) -> Result<LockFile> {
         LockFile::open(&self.locks_dir().join(key.lock_file_name()))
     }
 
@@ -296,15 +307,17 @@ impl Store {
         source: &Path,
         observer: &dyn Observer,
     ) -> Result<Ensured> {
+        let _turn = self.coordinator.take_turn(key);
         let lock = self.lock_for(key)?;
         let mut filled = None;
+        let mut announced = false;
 
-        for _ in 0..ENSURE_ATTEMPTS {
+        'attempt: for _ in 0..ENSURE_ATTEMPTS {
             // Reading needs only a shared lock, so many envoys can run from
             // one entry together.
-            if !lock.try_shared()? {
-                observer.waiting(key);
-                lock.shared()?;
+            while !lock.try_shared()? {
+                announce(&mut announced, key, observer);
+                thread::sleep(LOCK_POLL);
             }
             if self.reuse(key) {
                 return Ok(Ensured {
@@ -317,9 +330,19 @@ impl Store {
 
             // A lock cannot be upgraded in place, so fill under a fresh
             // exclusive one and check again: another envoy may have won.
-            if !lock.try_exclusive()? {
-                observer.waiting(key);
-                lock.exclusive()?;
+            //
+            // This waits by asking again rather than by blocking. A lease on
+            // an entry lasts as long as the command running from it, and on
+            // some systems a blocked request for the exclusive lock is passed
+            // over by every reader that comes after it, so it would wait for
+            // that command to end. Once the entry turns up there is nothing to
+            // fill: go back and read it.
+            while !lock.try_exclusive()? {
+                if self.lookup(key).is_some() {
+                    continue 'attempt;
+                }
+                announce(&mut announced, key, observer);
+                thread::sleep(LOCK_POLL);
             }
             if !self.reuse(key) {
                 filled = Some(self.fill(key, source, observer)?);
@@ -352,7 +375,7 @@ impl Store {
             self.remember_refusal(key, plan.longest);
             return Err(error);
         }
-        self.check_free_space(key, &plan)?;
+        let _room = self.promise_room(key, &plan)?;
 
         self.clean_orphans();
         observer.started(key, plan.files.len() as u64, plan.bytes);
@@ -538,18 +561,20 @@ impl Store {
             .collect()
     }
 
-    fn check_free_space(&self, key: &EntryKey, plan: &fill::Plan) -> Result<()> {
+    /// Promise the volume's free space to this fill until it ends.
+    ///
+    /// Fills running together each see the whole of it, so a fill waits for
+    /// the others when the space only suffices for one at a time.
+    fn promise_room(&self, key: &EntryKey, plan: &fill::Plan) -> Result<Promise> {
         let needed = plan.bytes.saturating_add(SPACE_HEADROOM);
-        match fs4::available_space(&self.root) {
-            Ok(available) if available < needed => Err(StoreError::InsufficientSpace {
+        self.coordinator
+            .promise(plan.bytes, needed, || fs4::available_space(&self.root).ok())
+            .map_err(|available| StoreError::InsufficientSpace {
                 key: key.to_string(),
                 path: self.root.clone(),
                 needed,
                 available,
-            }),
-            // If the volume cannot be measured, try anyway.
-            _ => Ok(()),
-        }
+            })
     }
 
     /// Delete staging and trash directories a dead process left behind.
@@ -707,6 +732,14 @@ impl Store {
 
         lock.unlock()?;
         Ok(removed)
+    }
+}
+
+/// Tell the observer once that this envoy is waiting on another.
+fn announce(announced: &mut bool, key: &EntryKey, observer: &dyn Observer) {
+    if !*announced {
+        *announced = true;
+        observer.waiting(key);
     }
 }
 

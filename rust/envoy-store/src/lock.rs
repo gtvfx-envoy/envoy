@@ -45,11 +45,6 @@ impl LockFile {
         }
     }
 
-    /// Take the lock shared, waiting for a writer to finish.
-    pub(crate) fn shared(&self) -> Result<()> {
-        FileExt::lock_shared(&self.file).map_err(io_error(&self.path))
-    }
-
     /// Take the lock exclusive without waiting. `false` means it is in use.
     pub(crate) fn try_exclusive(&self) -> Result<bool> {
         match FileExt::try_lock(&self.file) {
@@ -57,11 +52,6 @@ impl LockFile {
             Err(TryLockError::WouldBlock) => Ok(false),
             Err(TryLockError::Error(source)) => Err(io_error(&self.path)(source)),
         }
-    }
-
-    /// Take the lock exclusive, waiting for every holder to finish.
-    pub(crate) fn exclusive(&self) -> Result<()> {
-        FileExt::lock(&self.file).map_err(io_error(&self.path))
     }
 
     /// Release a lock this handle holds.
