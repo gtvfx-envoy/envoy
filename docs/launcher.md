@@ -64,7 +64,7 @@ The launcher is configured with environment variables. `ENVOY_CONFIG_PROD` is th
 
 The launcher decides in this order:
 
-1. If `ENVOY_BIN_LOCK` names an envoy (a program started by envoy is calling `envoy` again), that envoy runs. A nested call never changes version.
+1. If `ENVOY_BIN_LOCK` names an envoy (a program started by envoy is calling `envoy` again), that envoy runs. A nested call never changes version. Envoy also helps a nested call find it: in the environment it builds for a command, `PATH` starts with the `bin` folder of the envoy that is running, ahead of any envoy the stack itself lists, so `envoy` and `en` run from inside a command reach the envoy that started it. (`ENVOY_OWN_BIN=off` leaves `PATH` alone.)
 2. Otherwise `ENVOY_VERSION`, if set.
 3. Otherwise your login name is looked up in the redirect file: if you are listed you get your group's version, and everyone else gets the `default` version.
 

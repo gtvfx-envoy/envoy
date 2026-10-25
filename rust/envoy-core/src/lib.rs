@@ -32,6 +32,7 @@ pub mod executor;
 pub mod fs_lock;
 pub mod json_util;
 pub mod models;
+pub mod own_bin;
 pub mod python_api;
 pub mod retry;
 pub mod runtime;

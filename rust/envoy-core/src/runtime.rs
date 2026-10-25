@@ -661,6 +661,8 @@ pub fn prepare_env(
         })?;
     // The last word on PYTHONPATH, so anything the stack provides comes first.
     crate::python_api::apply(&mut env);
+    // And on PATH the other way round, so a nested `envoy` is this one.
+    crate::own_bin::apply(&mut env);
 
     Ok((env, command))
 }

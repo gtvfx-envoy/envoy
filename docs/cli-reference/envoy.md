@@ -374,6 +374,7 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_VCS` | Force a specific VCS backend for detection: `git`, `perforce`, or `lore` |
 | `ENVOY_PYINIT` | Platform-separated directories whose `*.py` files run once `import envoy` finishes initializing (see [Advanced Topics](../advanced.md#python-api-initialization-hooks-envoy_pyinit)) |
 | `ENVOY_PYTHON_API` | `off`, `false`, `no`, or `0` stops a release of envoy adding its own Python API (`py/`) to the end of `PYTHONPATH` for the commands it launches (see [Installation](../installation.md)) |
+| `ENVOY_OWN_BIN` | `off`, `false`, `no`, or `0` stops a release of envoy putting its own `bin` first on `PATH` for the commands it launches. That is what keeps a nested `envoy` or `en` on the version that started it, even when a stack lists an envoy bundle of its own (see [Launcher](../launcher.md#which-version-you-run)) |
 | `ENVOY_PYTHON_PATH` | Set by a release of envoy for the commands it launches: the directory of the Python API that ships with it |
 | `ENVOY_CONFIG_PROD` | The team's config folder, which holds `redirect.yaml` and `shim/`; read by the [launcher](../launcher.md) |
 | `ENVOY_TEAM` | A team name for the [launcher](../launcher.md): its `redirect.yaml` is looked for in `<ENVOY_CONFIG_PROD>/<team>` first |
