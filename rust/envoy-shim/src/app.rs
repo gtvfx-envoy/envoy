@@ -1,12 +1,14 @@
 //! Making a version of the envoy app runnable.
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use envoy_config::expand::expand_source;
 use envoy_store::settings::Location;
-use envoy_store::{EntryKey, Lease, Observer, Store};
+use envoy_store::{EntryKey, Lease, Observer, Outcome, Store};
 
 use crate::error::ShimError;
+use crate::version::{reported_by, same_version};
 
 /// The app is cached as a store entry under this namespace and name.
 const APP_NAMESPACE: &str = "app";
@@ -131,7 +133,12 @@ pub fn ensure(
     };
 
     match store.ensure(&key, &source, observer) {
-        Ok(ensured) => Ok(App::cached(ensured.path, ensured.lease)),
+        Ok(ensured) => {
+            if matches!(ensured.outcome, Outcome::Filled { .. }) {
+                check_reported_version(&ensured.path.join(exe_relative()), version);
+            }
+            Ok(App::cached(ensured.path, ensured.lease))
+        }
         Err(error) => {
             eprintln!(
                 "envoy: could not cache envoy {version} ({error}); running it from {}",
@@ -139,6 +146,38 @@ pub fn ensure(
             );
             Ok(App::from_source(source))
         }
+    }
+}
+
+/// Say so when an app that was just copied does not report the version it was
+/// published as.
+///
+/// The app is the authority on which version it is. A folder published under
+/// one name that holds another version, or a build whose label was never
+/// matched to its source, shows up here, once per machine, as the app is first
+/// cached. It still runs: a mislabelled version is a publishing slip, not a
+/// reason to stop a user.
+fn check_reported_version(exe: &Path, version: &str) {
+    let Ok(output) = Command::new(exe)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let answer = String::from_utf8_lossy(&output.stdout);
+    let Some(reported) = reported_by(&answer) else {
+        return;
+    };
+    if !same_version(reported, version) {
+        eprintln!(
+            "envoy: warning: the envoy published as {version} reports itself as {reported}. \
+             It runs anyway; ask whoever published it to check the version"
+        );
     }
 }
 

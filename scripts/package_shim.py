@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -11,6 +12,9 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIRECTORY = REPO_ROOT / "scripts" / "shim"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_version import checkReportedVersion  # noqa: E402
 
 # Cargo builds the launcher as ``envoy-shim`` so that it cannot collide with the CLI's ``envoy``.
 # It ships as ``envoy``, and ``en`` is the same program.
@@ -143,6 +147,12 @@ def main() -> int:
     """
     options = parseArguments()
     entries = archiveEntries(options.binary_dir.resolve(), options.windows)
+    suffix = ".exe" if options.windows else ""
+    checkReportedVersion(
+        options.binary_dir.resolve() / f"{BUILT_NAME}{suffix}",
+        options.version,
+        "--envoy-shim-version",
+    )
     output_directory = options.output_dir.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
 

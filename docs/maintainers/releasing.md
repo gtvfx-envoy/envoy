@@ -105,8 +105,44 @@ still be needed to deliver new statically linked or embedded behavior.
 ## Standard release sequence
 
 All operator-provided version inputs are unprefixed SemVer values such as
-`0.6.0`. Automation adds the `v` prefix when it addresses Git tags. Stable and
-prerelease SemVer values are accepted.
+`0.6.0`. Automation adds the `v` prefix when it addresses Git tags. A release is
+`X.Y.Z`; its pre-releases are `X.Y.Z-alpha.N` and `X.Y.Z-rc.N`.
+
+### Versions, pre-releases, and what a build reports
+
+The version in `rust/Cargo.toml` is the *target*: the version the work on `main`
+is heading for. It is set with **Prepare Release** and merged like any other
+change, before any tag exists, so a build of `main` says what it is part of
+instead of what came before it.
+
+| Stage | Versions | Meaning |
+|---|---|---|
+| Alpha | `0.8.0-alpha.1`, `0.8.0-alpha.2`, ... | Work toward 0.8.0 is under way. Declare `0.8.0-alpha.1` right after 0.7.0 is released. |
+| Release candidate | `0.8.0-rc.1`, `0.8.0-rc.2`, ... | Feature complete and being tested. |
+| Release | `0.8.0` | |
+
+They sort in that order, and the number is dotted so that `rc.2` sorts before
+`rc.10`. No other stage is accepted, and a release version never carries build
+metadata. Merging a Prepare Release pull request declares a target without
+tagging anything; **Tag Release** is what publishes one.
+
+What a build reports (`envoy --version`, `envoy-shim --envoy-shim-version`, and
+`envoy.__version__`) is the Cargo version with a leading `v`. A build from the
+commit tagged with that version reports exactly it, `v0.8.0-rc.1`. Any other
+build adds the commit it was built from after a `+`, as in
+`v0.8.0-rc.1+g8ec805c`, and `.dirty` after that when tracked files have
+uncommitted changes. Build metadata never changes how versions order, so that is
+a 0.8.0-rc.1 build, neither older nor newer than the candidate. The wheel takes
+the same version, written for Python as `0.8.0rc1`.
+
+Packaging holds a tagged build to this: `scripts/package_release.py` and
+`scripts/package_shim.py` run the built executable and refuse to package it as
+`v0.8.0-rc.1` when it says anything else. A build labelled with something that is
+not a version, such as the `dev` of a validation build, is not held to it. To
+test a candidate before tagging it, label the validation build with the version
+it is for (`-f version=v0.8.0-rc.1`), so the archive names, the `.bundle` marker,
+and the executable agree. The [launcher](../launcher.md) says so, once, when it
+copies an app that reports another version than the one it was published as.
 
 ### Which repository, and which version?
 
@@ -210,7 +246,6 @@ a draft pull request on `automation/release-v<version>` that:
 
 - updates `[workspace.package].version` in `rust/Cargo.toml`;
 - refreshes and validates the workspace entries in `rust/Cargo.lock`;
-- preserves the intentional Python package placeholder version `0.0.0`;
 - runs the release-readiness tests.
 
 The Envoy pull request also runs an advisory Envoy Utils compatibility check

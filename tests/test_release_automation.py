@@ -18,10 +18,10 @@ SPEC.loader.exec_module(release_automation)
 
 @pytest.mark.parametrize(
     "version",
-    ["0.6.0", "1.0.0-rc.1", "2.3.4+build.5"],
+    ["0.6.0", "0.8.0-alpha.1", "1.0.0-rc.1", "2.3.4-rc.12"],
 )
-def testValidateVersionAcceptsSemver(version):
-    """Valid SemVer values are returned unchanged."""
+def testValidateVersionAcceptsReleaseVersions(version):
+    """A release, an alpha, or a release candidate is returned unchanged."""
     assert release_automation.validateVersion(version) == version
 
 
@@ -30,6 +30,22 @@ def testValidateVersionRejectsInvalidValues(version):
     """Invalid release values are rejected."""
     with pytest.raises(ValueError, match="Invalid semantic version"):
         release_automation.validateVersion(version)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.8.0-beta.1", "0.8.0-rc1", "0.8.0-rc", "0.8.0-rc.0", "0.8.0-alpha.1.2", "0.8.0-dev.1"],
+)
+def testValidateVersionRejectsOtherPreReleaseStages(version):
+    """Only alpha.N and rc.N name a stage, so versions of a cycle sort and read the same way."""
+    with pytest.raises(ValueError, match="alpha.N or rc.N"):
+        release_automation.validateVersion(version)
+
+
+def testValidateVersionLeavesBuildMetadataToBuilds():
+    """A build adds its commit as metadata; a release version never carries it."""
+    with pytest.raises(ValueError, match="build metadata"):
+        release_automation.validateVersion("0.8.0-rc.1+g8ec805c")
 
 
 def testReplaceWorkspaceVersionTargetsOnlyWorkspacePackage(tmp_path):

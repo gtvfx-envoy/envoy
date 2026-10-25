@@ -17,10 +17,12 @@ Rust implementation used by the native `envoy` binary.
 
 ## Versioning
 
-CLI `--version` output and `envoy.__version__` come from
-`git describe --tags --always --dirty` at build time. Source archives without
-Git metadata fall back to the workspace's static Cargo version. Wheel metadata
-remains independently valid for Python packaging.
+CLI `--version` output and `envoy.__version__` are the version `Cargo.toml`
+declares, with a leading `v`. A build from the commit tagged with that version
+reports exactly it; any other build adds the commit it came from (`+g8ec805c`).
+Source archives without Git metadata report the declared version alone. The
+wheel's metadata carries the same version, written for Python. See
+[Versions, pre-releases, and what a build reports](../docs/maintainers/releasing.md#versions-pre-releases-and-what-a-build-reports).
 
 ## Prerequisites
 

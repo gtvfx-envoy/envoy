@@ -12,12 +12,30 @@ import pytest
 
 REPO_ROOT = Path(__file__).parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "package_shim.py"
+sys.path.insert(0, str(SCRIPT_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("package_shim", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 package_shim = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(package_shim)
 
 VERSION = "v1.2.3"
+
+
+@pytest.fixture(autouse=True)
+def builtLauncherIsNotRun(monkeypatch):
+    """The stand-in launchers here cannot answer; one test checks that the real one is asked."""
+    monkeypatch.setattr(package_shim, "checkReportedVersion", lambda *args: None)
+
+
+def testThePackagedLauncherIsAskedForItsOwnVersion(tmp_path, monkeypatch, capsys):
+    """The launcher is held to the version it is packaged as, by its own option."""
+    asked = []
+    monkeypatch.setattr(package_shim, "checkReportedVersion", lambda *args: asked.append(args))
+
+    runPackaging(tmp_path, monkeypatch, capsys)
+
+    program, label, argument = asked[0]
+    assert (program.name, label, argument) == ("envoy-shim.exe", VERSION, "--envoy-shim-version")
 
 
 def runPackaging(

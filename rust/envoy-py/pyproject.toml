@@ -4,7 +4,9 @@ build-backend = "maturin"
 
 [project]
 name = "envoy"
-version = "0.0.0"
+# The version is the Cargo workspace version, which maturin turns into a PEP 440 version:
+# 0.8.0-alpha.1 becomes 0.8.0a1 and 0.8.0-rc.1 becomes 0.8.0rc1.
+dynamic = ["version"]
 requires-python = ">=3.10"
 description = "Environment orchestration for managed application execution (Rust core, PyO3 bindings)."
 classifiers = [
