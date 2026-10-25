@@ -86,7 +86,7 @@ fn apply_for(
     Some(api)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     if cfg!(windows) {
         let normalize = |path: &Path| path.to_string_lossy().replace('/', "\\").to_lowercase();
         normalize(left).trim_end_matches('\\') == normalize(right).trim_end_matches('\\')

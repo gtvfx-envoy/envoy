@@ -90,6 +90,7 @@ static ENVOY_ENV_VARS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         "ENVOY_BNDL_ROOTS",
         "ENVOY_CONFIG_ROOT",
         "ENVOY_CONFIG_PROD",
+        "ENVOY_OWN_BIN",
         "ENVOY_PYTHON_API",
         "ENVOY_REDIRECT_CONFIG",
         "ENVOY_SHIM_TIMEOUT_MS",
@@ -1654,6 +1655,7 @@ mod tests {
                 ("ENVOY_VERSION", Some(OsStr::new("v0.8.0"))),
                 ("ENVOY_USER", Some(OsStr::new("someone"))),
                 ("ENVOY_PYTHON_API", Some(OsStr::new("off"))),
+                ("ENVOY_OWN_BIN", Some(OsStr::new("off"))),
                 // Each envoy sets this for the commands it launches.
                 ("ENVOY_PYTHON_PATH", Some(OsStr::new("C:/other/py"))),
             ],
@@ -1668,6 +1670,7 @@ mod tests {
                     "ENVOY_VERSION",
                     "ENVOY_USER",
                     "ENVOY_PYTHON_API",
+                    "ENVOY_OWN_BIN",
                 ] {
                     assert!(result.contains_key(name), "{name} should be inherited");
                 }

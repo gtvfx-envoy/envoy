@@ -57,6 +57,7 @@ fn isolated(mut command: Command) -> Command {
         .env_remove("ENVOY_COMMANDS_FILE")
         .env_remove("ENVOY_ALLOWLIST")
         .env_remove("ENVOY_PYTHON_API")
+        .env_remove("ENVOY_OWN_BIN")
         .env_remove("ENVOY_TELEMETRY_ENABLED")
         .env_remove("ENVOY_TELEMETRY_ENDPOINT")
         .env_remove("ENVOY_TELEMETRY_REDACT_ARGS")
@@ -2032,8 +2033,8 @@ fn release_copy(root: &Path) -> PathBuf {
     exe
 }
 
-/// Writes a checkout bundle whose `probe` command prints `PYTHONPATH` and
-/// `ENVOY_PYTHON_PATH`, each on a line of its own.
+/// Writes a checkout bundle whose `probe` command prints `PYTHONPATH`,
+/// `ENVOY_PYTHON_PATH` and `PATH`, each on a line of its own.
 fn write_python_probe(bundle_root: &Path) {
     let envoy_dir = bundle_root.join(".envoy");
     fs::create_dir_all(bundle_root.join(".git")).expect(".git dir should be created");
@@ -2046,9 +2047,9 @@ fn write_python_probe(bundle_root: &Path) {
         "probe.sh"
     };
     let body = if cfg!(windows) {
-        "@echo PYTHONPATH=%PYTHONPATH%\r\n@echo ENVOY_PYTHON_PATH=%ENVOY_PYTHON_PATH%\r\n"
+        "@echo PYTHONPATH=%PYTHONPATH%\r\n@echo ENVOY_PYTHON_PATH=%ENVOY_PYTHON_PATH%\r\n@echo PATH=%PATH%\r\n"
     } else {
-        "#!/bin/sh\necho \"PYTHONPATH=$PYTHONPATH\"\necho \"ENVOY_PYTHON_PATH=$ENVOY_PYTHON_PATH\"\n"
+        "#!/bin/sh\necho \"PYTHONPATH=$PYTHONPATH\"\necho \"ENVOY_PYTHON_PATH=$ENVOY_PYTHON_PATH\"\necho \"PATH=$PATH\"\n"
     };
     fs::write(bundle_root.join(script), body).expect("script should be written");
     #[cfg(unix)]
@@ -2145,6 +2146,56 @@ fn a_release_gives_the_commands_it_launches_its_python_api() {
         [canonical(&bundle.join("lib"))]
     );
     assert_eq!(probed(&opted_out, "ENVOY_PYTHON_PATH"), "");
+}
+
+#[test]
+fn a_release_puts_its_own_bin_ahead_of_an_envoy_the_stack_lists() {
+    let scratch = ScratchDir::new("envoy_release_own_bin");
+    let bundle = scratch.path().join("gt").join("probe");
+    write_python_probe(&bundle);
+    // A stack that pins an envoy of its own, whose bin is on PATH.
+    let pinned = bundle.join("pinned").join("bin");
+    fs::create_dir_all(&pinned).expect("pinned bin should be created");
+    fs::write(
+        bundle.join(".envoy").join("probe_env.json"),
+        r#"{"PYTHONPATH": ["${__BUNDLE__}/lib"], "PATH": ["${__BUNDLE__}/pinned/bin"]}"#,
+    )
+    .expect("probe_env.json should be rewritten");
+    let app = scratch.path().join("app");
+    let envoy = release_copy(&app);
+    fs::write(app.join(".bundle"), "{}").expect("a release has its marker");
+    let run = |args: &[&str]| {
+        let mut command = isolated(Command::new(&envoy));
+        command.args(args).env("ENVOY_BNDL_ROOTS", scratch.path());
+        command
+    };
+
+    let launched = run(&["probe"]).assert().success();
+    assert_eq!(
+        directories(&probed(&launched, "PATH")),
+        [canonical(&app.join("bin")), canonical(&pinned)],
+        "this envoy first, so a nested envoy is this one, then what the stack lists"
+    );
+
+    let traced = run(&["--trace", "PATH", "probe"]).assert().success();
+    let stdout = stdout_text(&traced);
+    assert!(
+        stdout.contains("a nested envoy is this one"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ENVOY_OWN_BIN=off"),
+        "stdout was:\n{stdout}"
+    );
+
+    let opted_out = run(&["probe"])
+        .env("ENVOY_OWN_BIN", "off")
+        .assert()
+        .success();
+    assert_eq!(
+        directories(&probed(&opted_out, "PATH")),
+        [canonical(&pinned)]
+    );
 }
 
 #[test]

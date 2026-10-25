@@ -14,6 +14,7 @@ use envoy_core::environment::{EnvironmentManager, TraceEvent};
 use envoy_core::error::EnvoyError;
 use envoy_core::executor::ProcessExecutor;
 use envoy_core::models::WrapperConfig;
+use envoy_core::own_bin;
 use envoy_core::python_api;
 use envoy_core::runtime::{
     apply_bundle_overrides, collect_env_files, is_raw_path, prepare_env,
@@ -1581,9 +1582,10 @@ fn trace_command(
             return 1;
         }
     };
-    // A launched command also gets the Python API this envoy ships with, so
-    // the traced value has to include it.
+    // A launched command also gets the Python API this envoy ships with, and
+    // this envoy's own bin first on PATH, so the traced value has to include them.
     let python_api = python_api::apply(&mut final_env);
+    let own_bin = own_bin::apply(&mut final_env);
 
     let final_value = final_env.get(trace_var);
     let separator = "─".repeat(64);
@@ -1685,6 +1687,16 @@ fn trace_command(
         println!("Added by this envoy:");
         println!("  its own Python API, {}", api.display());
         println!("  (ENVOY_PYTHON_API=off leaves PYTHONPATH alone)");
+        println!();
+    }
+    if let Some(bin) = own_bin.filter(|_| trace_var.eq_ignore_ascii_case("PATH")) {
+        println!("{separator}");
+        println!("Added by this envoy:");
+        println!(
+            "  its own bin, first, so that a nested envoy is this one: {}",
+            bin.display()
+        );
+        println!("  (ENVOY_OWN_BIN=off leaves PATH alone)");
         println!();
     }
 
