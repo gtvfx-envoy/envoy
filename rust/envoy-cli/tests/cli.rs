@@ -7,6 +7,9 @@ use assert_cmd::Command;
 use envoy_core::bundle_cache::BundleCache;
 use envoy_core::user_config::UserConfig;
 
+#[path = "../../test_support/startable.rs"]
+mod startable;
+
 fn stdout_text(assert: &assert_cmd::assert::Assert) -> String {
     String::from_utf8_lossy(&assert.get_output().stdout).into_owned()
 }
@@ -2024,7 +2027,7 @@ fn release_copy(root: &Path) -> PathBuf {
         .join("bin")
         .join(built.file_name().expect("the binary has a file name"));
     fs::create_dir_all(root.join("bin")).expect("bin dir should be created");
-    fs::copy(built, &exe).expect("the binary should be copied");
+    startable::copy_startable(built, &exe, "--version");
 
     let package = root.join("py").join("envoy");
     fs::create_dir_all(&package).expect("package dir should be created");

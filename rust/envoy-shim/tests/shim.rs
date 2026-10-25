@@ -7,6 +7,9 @@ use std::time::{Duration, SystemTime};
 
 use tempfile::{tempdir, TempDir};
 
+#[path = "../../test_support/startable.rs"]
+mod startable;
+
 const SHIM: &str = env!("CARGO_BIN_EXE_envoy-shim");
 
 const REDIRECT: &str = "\
@@ -132,7 +135,7 @@ impl Studio {
     fn install_shim(&self) -> PathBuf {
         fs::create_dir_all(self.bin()).expect("bin is created");
         let installed = self.bin().join(exe_name());
-        fs::copy(SHIM, &installed).expect("the shim is installed");
+        startable::copy_startable(Path::new(SHIM), &installed, "--envoy-shim-version");
         #[cfg(unix)]
         std::os::unix::fs::symlink("envoy", self.bin().join("en")).expect("en is linked");
         #[cfg(not(unix))]
