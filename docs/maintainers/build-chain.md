@@ -94,8 +94,8 @@ flowchart LR
 | `windows-x86_64` | Self-hosted Windows | Tests, builds the CLI and wheel, and packages a ZIP. |
 | `linux-x86_64` | GitHub-hosted `ubuntu-24.04` | Builds a static musl CLI with `cross`, builds a manylinux2014 wheel, and packages a `tar.gz`. |
 | `macos` | GitHub-hosted `macos-15-intel` and `macos-15` | Tests, builds the CLI and wheel, and packages a `tar.gz` per architecture. |
-| `publish` | GitHub-hosted `ubuntu-24.04` | Collects every artifact, writes `SHA256SUMS`, and creates the GitHub Release. Tag pushes only. |
-| `notify-downstream` | GitHub-hosted `ubuntu-24.04` | Tells Envoy Utils and Despatch about the release. Runs only when the `RELEASE_AUTOMATION_ENABLED` variable is `true`. |
+| `publish` | GitHub-hosted `ubuntu-24.04` | Collects every artifact, writes `SHA256SUMS`, and creates the GitHub Release (a GitHub pre-release for a tag with a hyphen, such as `v0.8.0-rc.1`). Tag pushes only. |
+| `notify-downstream` | GitHub-hosted `ubuntu-24.04` | Tells Envoy Utils and Despatch about the release. Runs only when the `RELEASE_AUTOMATION_ENABLED` variable is `true`, and not for a pre-release. |
 
 A platform job starts only after `verify-version` passes, and `publish` starts
 only after **all three** platform jobs pass. One failed platform therefore means
@@ -200,10 +200,17 @@ by hand (see [Release Troubleshooting](release-troubleshooting.md)).
 `fail_on_unmatched_files` makes the step fail if an expected file pattern
 matches nothing.
 
+A tag with a hyphen, such as `v0.8.0-rc.1` or `v0.8.0-alpha.2`, is published as a
+GitHub **pre-release**. GitHub never makes a pre-release the latest release, so
+anything that installs "the latest release" keeps getting the last stable one,
+and a pre-release is installed only by naming its tag.
+
 #### notify-downstream
 
-Runs only after `publish`, and only when the `RELEASE_AUTOMATION_ENABLED`
-repository variable is `true`. It mints an App token and sends a
+Runs only after `publish`, only when the `RELEASE_AUTOMATION_ENABLED`
+repository variable is `true`, and not for a pre-release: Envoy Utils and
+Despatch hear about stable releases only, so a release candidate does not open
+impact issues in them. It mints an App token and sends a
 `repository_dispatch` event named `envoy-released` to `envoy_utils` and
 `despatch`. The payload carries:
 

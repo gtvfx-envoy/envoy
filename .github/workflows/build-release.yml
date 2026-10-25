@@ -341,6 +341,10 @@ jobs:
             dist/*.whl
             dist/SHA256SUMS
           fail_on_unmatched_files: true
+          # A tag with a hyphen, such as v0.8.0-rc.1, is a pre-release. GitHub never makes a
+          # pre-release the latest release, so installers that ask for the latest keep getting
+          # the last stable one.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             Envoy supports Windows, Linux, and macOS. These artifacts are
             checksummed but currently unsigned. See the installation guide
@@ -348,7 +352,9 @@ jobs:
 
   notify-downstream:
     name: Notify downstream repositories
-    if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+    # Only a stable release is announced. A pre-release (a tag with a hyphen) is for testing
+    # Envoy itself, and Envoy Utils and Despatch would otherwise open impact issues for it.
+    if: vars.RELEASE_AUTOMATION_ENABLED == 'true' && !contains(github.ref_name, '-')
     needs: publish
     runs-on: ubuntu-24.04
     permissions:
