@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0-alpha.1"
 edition = "2021"
 # GPL-3.0, matching ../LICENSE. A `license-file` path can't be used here
 # since maturin requires license files to resolve inside the Cargo
