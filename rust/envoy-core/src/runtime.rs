@@ -735,11 +735,12 @@ fn path_to_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Once;
 
     use serde_json::{json, Value};
     use tempfile::tempdir;
@@ -1483,8 +1484,21 @@ be substituted with the cached path"
         assert_eq!(resolved_without_prod_root[0].root, original.root);
     }
 
-    /// Records the level of every tracing event emitted on this thread.
-    struct LevelRecorder(Arc<Mutex<Vec<tracing::Level>>>);
+    thread_local! {
+        /// The levels of the events this thread has emitted since
+        /// `logged_levels` began, or `None` while it is not recording.
+        static LOGGED: RefCell<Option<Vec<tracing::Level>>> = const { RefCell::new(None) };
+    }
+
+    /// Records the level of every tracing event emitted on a thread that is
+    /// recording.
+    ///
+    /// It is the global subscriber, not one set for a single thread. Tracing
+    /// decides whether a callsite is enabled once, when the first thread
+    /// reaches it, and while only one subscriber exists it asks just the one
+    /// that thread has. A test thread with none would switch the callsite off
+    /// for everyone, and the recording thread would miss the event.
+    struct LevelRecorder;
 
     impl tracing::Subscriber for LevelRecorder {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
@@ -1500,10 +1514,11 @@ be substituted with the cached path"
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
-            self.0
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(*event.metadata().level());
+            LOGGED.with(|logged| {
+                if let Some(levels) = logged.borrow_mut().as_mut() {
+                    levels.push(*event.metadata().level());
+                }
+            });
         }
 
         fn enter(&self, _span: &tracing::span::Id) {}
@@ -1512,13 +1527,33 @@ be substituted with the cached path"
     }
 
     fn logged_levels(run: impl FnOnce()) -> Vec<tracing::Level> {
-        let recorded = Arc::new(Mutex::new(Vec::new()));
-        tracing::subscriber::with_default(LevelRecorder(Arc::clone(&recorded)), run);
-        let levels = recorded
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        levels
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            tracing::subscriber::set_global_default(LevelRecorder)
+                .expect("no other test installs a global subscriber");
+        });
+
+        LOGGED.with(|logged| *logged.borrow_mut() = Some(Vec::new()));
+        run();
+        LOGGED
+            .with(|logged| logged.borrow_mut().take())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_callsite_first_reached_on_another_thread_is_still_recorded() {
+        fn emit() {
+            tracing::info!("a callsite that only this test reaches");
+        }
+
+        let levels = logged_levels(|| {
+            // A thread that is not recording gets to the callsite first, as
+            // another test running at the same time may.
+            std::thread::spawn(emit).join().expect("thread finishes");
+            emit();
+        });
+
+        assert_eq!(levels, [tracing::Level::INFO]);
     }
 
     #[test]
