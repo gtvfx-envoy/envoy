@@ -24,12 +24,15 @@ WORKSPACE_PACKAGE_NAMES = {
     "envoy-shim",
     "envoy-store",
 }
-# Crates whose sources reach Envoy Utils: it depends on envoy-core, which depends on envoy-store.
-UTILS_REACHABLE_CRATES = ("envoy-core", "envoy-store")
+# Crates whose sources reach Envoy Utils: it depends on envoy-core, which depends on envoy-store
+# and envoy-config (and re-exports the latter as `envoy_core::config`).
+UTILS_REACHABLE_CRATES = ("envoy-config", "envoy-core", "envoy-store")
 DIRECT_UTILS_APIS = (
     "envoy_core::discovery::{discover_bundles_auto, Bundle}",
     "envoy_core::stack::Stack",
     "envoy_core::stack_registry::STACK_ROOTS_VAR",
+    "envoy_core::config::redirect::{Redirect, Problem, Severity}",
+    "envoy_core::config::expand::expand_source",
 )
 
 

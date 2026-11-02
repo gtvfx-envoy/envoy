@@ -48,6 +48,14 @@ pub mod wrapper;
 
 pub use error::{EnvoyError, Result};
 
+/// The configuration files that deliver envoy: the redirect that pins a version
+/// for each user, with its validation, resolution, and snapshots.
+///
+/// Re-exported so that a tool that already depends on `envoy-core`, such as
+/// `engit`, reads and checks these files with the same code as the launcher,
+/// through the one versioned dependency it already has.
+pub use envoy_config as config;
+
 /// Shared test-only synchronization for tests that mutate real process
 /// environment variables (`ENVOY_STACK_ROOTS`, `ENVOY_CONFIG_ROOT`,
 /// `ENVOY_COMMANDS_FILE`, `ENVOY_BNDL_ROOTS`, etc.).

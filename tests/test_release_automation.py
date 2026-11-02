@@ -153,12 +153,15 @@ def testEveryWorkspaceMemberIsCheckedForTheReleaseVersion():
         (["rust/envoy-core/Cargo.toml"], True),
         (["rust/envoy-store/src/store.rs"], True),
         (["rust/envoy-store/Cargo.toml"], True),
+        (["rust/envoy-config/src/redirect.rs"], True),
+        (["rust/envoy-config/Cargo.toml"], True),
         (["rust/envoy-cli/src/app.rs", "docs/concepts.md"], False),
         (["rust/envoy-store/tests/extra.rs"], False),
+        (["rust/envoy-shim/src/flags.rs"], False),
     ],
 )
 def testClassifyImpactWatchesTheCratesEnvoyUtilsBuilds(tmp_path, changed, relevant):
-    """Envoy Utils builds envoy-core and, through it, envoy-store."""
+    """Envoy Utils builds envoy-core and, through it, envoy-store and envoy-config."""
     with mock.patch.object(release_automation, "changedFiles", return_value=changed):
         result = release_automation.classifyImpact(tmp_path, "base", "head")
     assert result["relevant"] is relevant

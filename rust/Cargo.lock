@@ -568,6 +568,7 @@ dependencies = [
  "age",
  "base64 0.22.1",
  "ctrlc",
+ "envoy-config",
  "envoy-store",
  "fs4",
  "hex",
