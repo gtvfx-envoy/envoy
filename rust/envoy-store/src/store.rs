@@ -13,6 +13,7 @@ use crate::error::{io_error, Result, StoreError};
 use crate::fill;
 use crate::key::EntryKey;
 use crate::lock::{Lease, LockFile};
+use crate::long_paths::LongPaths;
 use crate::observer::Observer;
 use crate::refusal::{self, Refusal, REFUSED_DIR};
 use crate::state::{
@@ -32,13 +33,6 @@ const ORPHAN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Free space kept in reserve beyond the size of a fill.
 const SPACE_HEADROOM: u64 = 64 * 1024 * 1024;
 
-/// Longest path (in characters) the store will create on Windows, leaving
-/// room below the classic 260 limit that many tools still honour.
-///
-/// It applies to where an entry finally lives, because that is where other
-/// programs open files. A staging path is only ever used by the store, and the
-/// standard library gives it the long-path prefix, so it may be longer.
-const WINDOWS_PATH_LIMIT: usize = 250;
 /// Times `ensure` will start over when an entry is removed under it.
 const ENSURE_ATTEMPTS: u32 = 3;
 
@@ -191,6 +185,8 @@ pub struct Verdict {
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
+    /// What the machine allows for the length of a path, which the guard follows.
+    long_paths: LongPaths,
     /// Shared by clones, so every thread using this store is coordinated.
     coordinator: Arc<Coordinator>,
 }
@@ -227,8 +223,24 @@ impl Store {
 
         Ok(Self {
             root,
+            long_paths: LongPaths::detect(),
             coordinator: Arc::default(),
         })
+    }
+
+    /// Keep to what `long_paths` allows instead of what this machine reports.
+    ///
+    /// A store reads the machine's setting when it is opened. This is for a
+    /// caller that knows better, and for tests, which must not depend on the
+    /// machine they run on.
+    pub fn with_long_paths(mut self, long_paths: LongPaths) -> Self {
+        self.long_paths = long_paths;
+        self
+    }
+
+    /// Return what the store allows for the length of a path.
+    pub fn long_paths(&self) -> LongPaths {
+        self.long_paths
     }
 
     /// Open the store at `root` only if it already exists.
@@ -474,17 +486,22 @@ impl Store {
     }
 
     /// Fail when the entry's longest path would not fit under the store root.
+    ///
+    /// The limit is measured where an entry finally lives, because that is
+    /// where other programs open files. A staging path is only ever used by the
+    /// store, and the standard library gives it the long-path prefix, so it may
+    /// be longer.
     fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
-        if !cfg!(windows) {
+        let Some(limit) = self.long_paths.limit() else {
             return Ok(());
-        }
+        };
 
         let needed = self.entry_path(key).as_os_str().len() + 1 + longest;
-        if needed > WINDOWS_PATH_LIMIT {
+        if needed > limit {
             return Err(StoreError::PathTooLong {
                 key: key.to_string(),
                 needed,
-                limit: WINDOWS_PATH_LIMIT,
+                limit,
                 root: self.root.clone(),
                 remembered,
             });

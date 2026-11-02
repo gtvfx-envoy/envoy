@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use envoy_core::bundle_store::{
     existing_store, format_bytes, last_prune, on_network, open_store, summarize, warm,
-    warm_command, CacheSettings, Health, ProgressPrinter, PrunePolicy, WarmReport,
+    warm_command, CacheSettings, Health, LongPaths, ProgressPrinter, PrunePolicy, WarmReport,
 };
 use envoy_core::commands::CommandRegistry;
 use envoy_core::discovery::BundleInfo;
@@ -65,6 +65,9 @@ file locks may be unreliable. Point ENVOY_CACHE_ROOT at a local disk."
         if settings.enabled { "on" } else { "off" },
         settings.enabled_by
     );
+    if let Some(report) = LongPaths::detect().describe() {
+        println!("Long paths: {report}");
+    }
 
     match summarize(settings) {
         Some(summary) => {

@@ -18,5 +18,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing = "0.1"
 
+# Reads the Windows setting that lets a path pass 260 characters.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 tempfile = "3"

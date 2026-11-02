@@ -162,6 +162,13 @@ fn the_launcher_is_installed_as_envoy_and_en() {
         "it points at the next step:\n{}",
         text(&output)
     );
+    // Windows says whether long paths are on; elsewhere there is nothing to say.
+    assert_eq!(
+        text(&output).contains("Windows long paths:"),
+        cfg!(windows),
+        "{}",
+        text(&output)
+    );
 
     let again = machine.install_from(&machine.release);
     assert!(again.status.success(), "{}", text(&again));

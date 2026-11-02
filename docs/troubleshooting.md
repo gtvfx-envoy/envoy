@@ -20,12 +20,13 @@ below.
 
 `en --diagnose` shows beside each bundle whether it is `[cached]`,
 `[not cached yet]`, `[refused: ...]` or `[never cached: ...]`, and why.
-`en cache status` shows where the cache is and whether caching is on.
+`en cache status` shows where the cache is and whether caching is on, and on
+Windows whether long paths are on.
 
 | What you see | What it means |
 |---|---|
 | `[never cached: it has no .bundle marker ...]` | The bundle was copied to the share by hand. Publish it with `engit publish bundle`, which writes the marker |
-| `[refused: ... would reach N characters ...]` | A path in the bundle is too long for Windows under the cache directory. Choose a shorter one with `ENVOY_CACHE_ROOT` (or `--cache-root`), or publish the bundle with shorter paths |
+| `[refused: ... would reach N characters ...]` | A path in the bundle is too long for Windows under the cache directory. Choose a shorter one with `ENVOY_CACHE_ROOT` (or `--cache-root`), publish the bundle with shorter paths, or ask an administrator to turn on Windows long paths (see [Long paths on Windows](team-administration.md#long-paths-on-windows)); `en cache status` says whether they are on |
 | `Bundle caching is unavailable` warning | The cache directory cannot be created or written, for example because it is read-only. Envoy runs from the share meanwhile; point `ENVOY_CACHE_ROOT` somewhere writable |
 | `Could not cache ... not enough free space` | The drive holding the cache is full. `en cache list` shows what is using it; `en cache prune` or `en cache clear` frees it, and `ENVOY_CACHE_MAX_SIZE` keeps it bounded |
 | The first run of a command is slow | Expected: bundles are copied once. Warm a machine ahead of time with `en --noop` |

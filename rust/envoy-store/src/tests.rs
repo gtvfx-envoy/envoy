@@ -9,8 +9,8 @@ use tempfile::{tempdir, TempDir};
 
 use crate::refusal::{self, Refusal};
 use crate::{
-    EntryKey, EntryState, Health, Observer, Outcome, PrunePolicy, Quiet, Store, StoreError,
-    STORE_FORMAT,
+    EntryKey, EntryState, Health, LongPaths, Observer, Outcome, PrunePolicy, Quiet, Store,
+    StoreError, STORE_FORMAT,
 };
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -583,13 +583,15 @@ fn a_store_or_entry_from_a_newer_envoy_is_left_alone() {
     assert!(entry.exists());
 }
 
-#[cfg(windows)]
-/// A store whose root is too deep for the source's deepest file to fit under it.
+/// A store whose root is too deep for the source's deepest file to fit under it,
+/// while long paths are off.
 fn too_deep_for_the_store(temp: &Path) -> (Store, PathBuf) {
     let root = (0..9).fold(temp.join("store"), |path, level| {
         path.join(format!("deep_root_{level}"))
     });
-    let store = Store::open(&root).expect("store opens");
+    let store = Store::open(&root)
+        .expect("store opens")
+        .with_long_paths(LongPaths::Off);
     let source = temp.join("source");
     let deep = (0..12).fold(source.clone(), |path, level| {
         path.join(format!("nested_{level:05}"))
@@ -598,7 +600,6 @@ fn too_deep_for_the_store(temp: &Path) -> (Store, PathBuf) {
     (store, source)
 }
 
-#[cfg(windows)]
 #[test]
 fn an_entry_whose_paths_would_be_too_long_is_refused() {
     let temp = tempdir().expect("tempdir is created");
@@ -621,7 +622,6 @@ fn an_entry_whose_paths_would_be_too_long_is_refused() {
     assert!(store.lookup(&key("1.0.0")).is_none());
 }
 
-#[cfg(windows)]
 #[test]
 fn a_refused_entry_is_not_walked_again() {
     let temp = tempdir().expect("tempdir is created");
@@ -649,7 +649,6 @@ fn a_refused_entry_is_not_walked_again() {
     );
 }
 
-#[cfg(windows)]
 /// A source whose one file has a path of exactly `longest` characters.
 fn source_with_longest_path(parent: &Path, longest: usize) -> PathBuf {
     let source = parent.join("source");
@@ -657,11 +656,12 @@ fn source_with_longest_path(parent: &Path, longest: usize) -> PathBuf {
     source
 }
 
-#[cfg(windows)]
 #[test]
 fn the_path_limit_is_measured_at_the_final_location() {
     let temp = tempdir().expect("tempdir is created");
-    let store = Store::open(temp.path().join("store")).expect("store opens");
+    let store = Store::open(temp.path().join("store"))
+        .expect("store opens")
+        .with_long_paths(LongPaths::Off);
     let fits = EntryKey::new("a", "b", "1").expect("key is valid");
     let over = EntryKey::new("a", "b", "2").expect("key is valid");
     let longest = 250 - (store.entry_path(&fits).as_os_str().len() + 1);
@@ -691,6 +691,65 @@ fn the_path_limit_is_measured_at_the_final_location() {
             }
         ),
         "{error}"
+    );
+}
+
+#[test]
+fn the_limit_follows_the_long_paths_setting() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let key = key("1.0.0");
+    let error = off
+        .ensure(&key, &source, &Quiet)
+        .expect_err("a deep bundle does not fit while long paths are off");
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                remembered: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let record = off.refusal_path(&key);
+    assert!(record.exists(), "the refusal is remembered");
+
+    // The same store once long paths are on: the remembered refusal no longer holds.
+    let on = off.clone().with_long_paths(LongPaths::On);
+    assert!(on.refusal(&key).is_none());
+    let ensured = on
+        .ensure(&key, &source, &Quiet)
+        .expect("a deep bundle is cached once long paths are on");
+
+    assert!(matches!(ensured.outcome, Outcome::Filled { .. }));
+    assert!(!record.exists(), "the refusal is forgotten");
+    assert!(on.lookup(&key).is_some());
+}
+
+#[test]
+fn a_system_without_the_limit_never_refuses() {
+    let temp = tempdir().expect("tempdir is created");
+    let (store, source) = too_deep_for_the_store(temp.path());
+    let store = store.with_long_paths(LongPaths::NotWindows);
+
+    let ensured = store
+        .ensure(&key("1.0.0"), &source, &Quiet)
+        .expect("no limit applies");
+
+    assert!(matches!(ensured.outcome, Outcome::Filled { .. }));
+}
+
+#[test]
+fn a_store_keeps_to_the_machines_setting_unless_told_otherwise() {
+    let temp = tempdir().expect("tempdir is created");
+    let store = Store::open(temp.path().join("store")).expect("store opens");
+    assert_eq!(store.long_paths(), LongPaths::detect());
+
+    assert_eq!(
+        store.with_long_paths(LongPaths::Off).long_paths(),
+        LongPaths::Off
     );
 }
 
@@ -812,7 +871,6 @@ fn open_existing_never_creates_a_store() {
         .is_some());
 }
 
-#[cfg(windows)]
 #[test]
 fn refusals_lists_what_does_not_fit_without_touching_the_record() {
     let temp = tempdir().expect("tempdir is created");

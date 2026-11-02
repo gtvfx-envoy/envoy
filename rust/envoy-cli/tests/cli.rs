@@ -977,6 +977,12 @@ fn cache_actions_report_and_clean_up_without_a_stack() {
     assert!(stdout.contains(&cache_root.display().to_string()));
     assert!(stdout.contains("none (the cache has not been created yet)"));
     assert!(!cache_root.exists(), "status must not create the cache");
+    // Windows says whether long paths are on; elsewhere there is no limit to report.
+    assert_eq!(
+        stdout.contains("Long paths: "),
+        cfg!(windows),
+        "stdout was:\n{stdout}"
+    );
 
     caching_command(&cache_root)
         .arg("--stack")
@@ -1169,6 +1175,12 @@ fn diagnose_shows_how_each_bundle_stands_with_the_cache() {
     let stdout = stdout_text(&before);
     assert!(stdout.contains("[not cached yet]"), "stdout was:\n{stdout}");
     assert!(!cache_root.exists(), "diagnosing must not create the cache");
+    // Windows says whether long paths are on; elsewhere there is no limit to report.
+    assert_eq!(
+        stdout.contains("  long paths: "),
+        cfg!(windows),
+        "stdout was:\n{stdout}"
+    );
 
     caching_command(&cache_root)
         .arg("--stack")

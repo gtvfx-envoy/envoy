@@ -40,7 +40,8 @@ pub enum StoreError {
     /// The longest path in the entry would not fit under the store root.
     ///
     /// The refusal is remembered, so the source is not walked again until the
-    /// store moves or the rule changes.
+    /// store moves or the limit changes, for example when Windows long paths
+    /// are turned on.
     #[error(
         "{key} contains paths that would reach {needed} characters under {root}; \
 the limit is {limit}"

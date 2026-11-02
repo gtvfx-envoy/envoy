@@ -241,6 +241,25 @@ function Find-ShadowingEnvoy([string]$Folder) {
     return $null
 }
 
+# Says whether Windows lets paths pass 260 characters. A bundle whose paths would pass the limit
+# runs from the share instead of the local cache. This only reads the setting.
+function Write-LongPathsNote {
+    $enabled = $false
+    try {
+        $setting = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -ErrorAction Stop
+        $enabled = ($setting.LongPathsEnabled -eq 1)
+    }
+    catch {
+        # No value is the default, which is off.
+    }
+    if ($enabled) {
+        Write-Host 'Windows long paths: on (paths in the cache may reach about 32,000 characters).'
+    }
+    else {
+        Write-Host 'Windows long paths: off (paths in the cache are limited to 250 characters). A bundle with deeper folders then runs from the share. An administrator can turn long paths on: see "Long paths on Windows" in the team administration guide.'
+    }
+}
+
 function Install-Launcher {
     $launcher = Find-Launcher $Source
     if ($Scope -eq 'Machine') { Assert-Administrator }
@@ -276,6 +295,8 @@ function Install-Launcher {
             Write-Warning "A new terminal will find $shadow before this launcher. Remove its folder from PATH, or put $bin ahead of it."
         }
     }
+
+    Write-LongPathsNote
 
     if ($env:ENVOY_CONFIG_PROD -or $env:ENVOY_REDIRECT_CONFIG) {
         Write-Host ''

@@ -120,7 +120,8 @@ Show a full diagnostic report: discovered bundles and commands, resolved
 the current Stack and team config (`.envoy/team.json`),
 bundle cache location and state (and, beside each bundle, whether it is
 cached, not cached yet, refused because its paths are too long for the cache
-directory, or never cached), detected VCS backend (Git,
+directory, or never cached; on Windows, also whether
+[long paths](../team-administration.md#long-paths-on-windows) are on), detected VCS backend (Git,
 Perforce, or [Lore](https://github.com/EpicGames/lore)) with its pending
 change count, telemetry status, and bundle-root reachability (flagging
 network/UNC paths). Pass a command name to also see its full resolved
@@ -152,6 +153,7 @@ Team config: bfd
   prod_bundles_root:  \\server\bundles
 
 Bundle cache: C:\Users\you\.envoy\cache (on, set by the default)
+  long paths: on (paths in the cache may reach about 32,000 characters; a program must declare itself long-path aware to open them)
   3 entries, 781.9 MB
 
 VCS detected: git at R:/repo/gtvfx-envoy
@@ -226,7 +228,7 @@ Published bundles are copied to a local [cache](../caching.md) the first time a 
 
 | Command | What it does |
 |---|---|
-| `envoy cache status` | Where the cache is, whether caching is on and what decided that, how many entries and how much space, bundles that do not fit, and when it was last pruned |
+| `envoy cache status` | Where the cache is, whether caching is on and what decided that, on Windows whether [long paths](../team-administration.md#long-paths-on-windows) are on, how many entries and how much space, bundles that do not fit, and when it was last pruned |
 | `envoy cache list` | Every entry with its size and when it was last used |
 | `envoy cache verify` | Check each entry against what was recorded when it was copied: nothing missing, nothing extra, sizes add up. Exits `1` when an entry is damaged. It does not read file contents |
 | `envoy cache prune [--dry-run]` | Remove entries unused for the idle period (`ENVOY_CACHE_MAX_IDLE_DAYS`, default 30 days), and the least recently used beyond `ENVOY_CACHE_MAX_SIZE` if set. Never removes an entry a running envoy is using |
