@@ -204,11 +204,35 @@ fn the_installer_mentions_a_path_cap_only_while_one_is_set() {
     assert!(capped.status.success(), "{}", text(&capped));
     // Only Windows says anything about the limit, so only Windows has a line to correct.
     assert_eq!(
-        text(&capped).contains("ENVOY_CACHE_MAX_PATH is set to '200'"),
+        text(&capped).contains("ENVOY_CACHE_MAX_PATH is set to 200,"),
         cfg!(windows),
         "{}",
         text(&capped)
     );
+
+    // The installer reads it the way envoy does: blank is not set, and anything
+    // but a whole number above zero is ignored.
+    for blank in ["", "   "] {
+        let output =
+            machine.install_from_with(&machine.release, &[("ENVOY_CACHE_MAX_PATH", blank)]);
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(
+            !text(&output).contains("ENVOY_CACHE_MAX_PATH"),
+            "{}",
+            text(&output)
+        );
+    }
+    for unusable in ["lots", "0"] {
+        let output =
+            machine.install_from_with(&machine.release, &[("ENVOY_CACHE_MAX_PATH", unusable)]);
+        assert!(output.status.success(), "{}", text(&output));
+        assert_eq!(
+            text(&output).contains("not a whole number above zero, so envoy ignores it"),
+            cfg!(windows),
+            "{unusable:?}: {}",
+            text(&output)
+        );
+    }
 }
 
 #[test]

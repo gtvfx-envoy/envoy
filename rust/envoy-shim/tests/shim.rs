@@ -405,7 +405,7 @@ fn with_caching_off_envoy_runs_from_the_share() {
 }
 
 #[test]
-fn an_app_the_path_cap_refuses_runs_from_the_share_and_says_so_at_each_start() {
+fn the_path_cap_does_not_keep_the_launcher_from_the_app_it_has_cached() {
     let studio = Studio::new(&["v1"]);
     let run = || {
         studio
@@ -416,22 +416,23 @@ fn an_app_the_path_cap_refuses_runs_from_the_share_and_says_so_at_each_start() {
     };
 
     let first = run();
+    // With the share gone, only the copy in the cache can start.
+    fs::remove_dir_all(&studio.share).expect("the share goes away");
     let second = run();
 
     for output in [&first, &second] {
+        assert!(output.status.success(), "{}", stderr(output));
         assert!(
-            in_directory(&started_from(output), &studio.share),
+            in_directory(&started_from(output), &studio.cache),
             "stdout was:\n{}",
             stdout(output)
         );
-        let said = stderr(output);
         assert!(
-            said.contains("could not cache envoy v1")
-                && said.contains("(set by ENVOY_CACHE_MAX_PATH)"),
-            "stderr was:\n{said}"
+            !stderr(output).contains("could not cache"),
+            "stderr was:\n{}",
+            stderr(output)
         );
     }
-    assert!(!studio.cache.join("bundles/app/envoy/v1").exists());
 }
 
 #[test]

@@ -272,9 +272,17 @@ function Write-LongPathsNote {
         }
     }
 
-    # A cap in the environment can lower the limit below what is said above.
-    if ($env:ENVOY_CACHE_MAX_PATH) {
-        Write-Host "ENVOY_CACHE_MAX_PATH is set to '$($env:ENVOY_CACHE_MAX_PATH)', which can lower that limit. 'envoy cache status' shows the limit envoy uses."
+    # A cap in the environment can lower the limit below what is said above. It is read
+    # the way envoy reads it: empty is not set, and only a whole number above zero is a cap.
+    $cap = "$env:ENVOY_CACHE_MAX_PATH".Trim()
+    if ($cap) {
+        [uint64]$limit = 0
+        if ($cap -match '^\+?[0-9]+$' -and [uint64]::TryParse($cap.TrimStart('+'), [ref]$limit) -and $limit -gt 0) {
+            Write-Host "ENVOY_CACHE_MAX_PATH is set to $limit, which can lower that limit. 'envoy cache status' shows the limit envoy uses."
+        }
+        else {
+            Write-Host "ENVOY_CACHE_MAX_PATH is set to '$cap', which is not a whole number above zero, so envoy ignores it."
+        }
     }
 }
 

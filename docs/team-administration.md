@@ -172,7 +172,7 @@ Turning on long paths lets envoy cache bundles that a program without long-path 
 [Environment]::SetEnvironmentVariable('ENVOY_CACHE_MAX_PATH', '250', 'Machine')
 ```
 
-Envoy uses the lower of this and what Windows allows, so the variable can only lower the limit: it cannot raise it past what Windows allows, and with long paths off a value above 250 changes nothing. It applies to everything the cache holds, including the launcher's copies of envoy itself (one that does not fit runs from the share, and says so each time it starts), and it works the same on Linux and macOS, which have no limit of their own. Programs read environment variables when they start, so open a new terminal after setting it. An empty value means it is not set, and a value that is not a whole number above zero is ignored; the reports below say so.
+Envoy uses the lower of this and what Windows allows, so the variable can only lower the limit: it cannot raise it past what Windows allows, and with long paths off a value above 250 changes nothing. It applies to the bundles the cache holds, not to the launcher's own copies of envoy, which the launcher runs itself: a cap that was mistyped must not stop envoy from starting. It works the same on Linux and macOS, which have no limit of their own. Programs read environment variables when they start, so open a new terminal after setting it. An empty value means it is not set, and a value that is not a whole number above zero is ignored; the reports below say so.
 
 While it is set, `en cache status` prints a `Path limit:` line, and `en --diagnose` a `path limit:` line in its cache section. Nothing is printed while it is not set, because the `Long paths:` line already says what the limit is.
 
