@@ -310,6 +310,7 @@ fn publish_by_hand(store: &Store, key: &EntryKey) {
             source: String::new(),
             filled_at: 0,
             created_by: String::new(),
+            longest: None,
         },
     )
     .expect("state is written");
@@ -751,6 +752,107 @@ fn a_store_keeps_to_the_machines_setting_unless_told_otherwise() {
         store.with_long_paths(LongPaths::Off).long_paths(),
         LongPaths::Off
     );
+}
+
+#[test]
+fn an_entry_cached_while_long_paths_were_on_is_set_aside_when_they_go_off() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.clone().with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet)
+        .expect("it is cached while long paths are on");
+    assert!(
+        off.refusal(&key).is_some(),
+        "diagnose can tell before any run has"
+    );
+    assert!(off.refusals().is_empty(), "no run has recorded it yet");
+
+    let error = off
+        .ensure(&key, &source, &Quiet)
+        .expect_err("it no longer fits");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                remembered: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let again = off
+        .ensure(&key, &source, &Quiet)
+        .expect_err("it still does not fit");
+    assert!(
+        matches!(
+            again,
+            StoreError::PathTooLong {
+                remembered: true,
+                ..
+            }
+        ),
+        "the second run says nothing new: {again}"
+    );
+    assert_eq!(off.refusals().len(), 1, "cache status lists it");
+    assert!(off.lookup(&key).is_some(), "the files stay for prune");
+
+    let ensured = on
+        .ensure(&key, &source, &Quiet)
+        .expect("it fits again once long paths are back on");
+    assert!(matches!(ensured.outcome, Outcome::Hit));
+}
+
+#[test]
+fn an_entry_filled_before_depths_were_recorded_is_served_whatever_the_limit() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.clone().with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet).expect("it is cached");
+    // An entry that an earlier envoy filled has no depth in its state.
+    let state_file = on.entry_path(&key).join(".store/state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).expect("state reads"))
+            .expect("state parses");
+    state
+        .as_object_mut()
+        .expect("state is an object")
+        .remove("longest")
+        .expect("a depth was recorded");
+    fs::write(&state_file, state.to_string()).expect("state is written");
+
+    let ensured = off
+        .ensure(&key, &source, &Quiet)
+        .expect("it passed the fixed limit when it was filled");
+
+    assert!(matches!(ensured.outcome, Outcome::Hit));
+    assert!(off.refusal(&key).is_none());
+}
+
+#[test]
+fn an_entry_that_is_set_aside_is_not_refreshed_so_prune_can_remove_it() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.clone().with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet).expect("it is cached");
+    let stamp = on.entry_path(&key).join(".store/last-used");
+    File::options()
+        .write(true)
+        .open(&stamp)
+        .expect("last-used opens")
+        .set_modified(SystemTime::now() - 40 * DAY)
+        .expect("last-used is backdated");
+
+    off.ensure(&key, &source, &Quiet)
+        .expect_err("it no longer fits");
+    let report = off.prune(&PrunePolicy::idle_for(30 * DAY));
+
+    assert_eq!(report.removed.len(), 1, "{report:?}");
+    assert!(off.lookup(&key).is_none());
 }
 
 #[test]

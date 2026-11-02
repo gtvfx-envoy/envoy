@@ -537,10 +537,11 @@ pub fn standing(bundle: &BundleInfo, store: Option<&Store>) -> Standing {
     let Some(store) = store else {
         return Standing::NotCachedYet;
     };
-    if store.lookup(&key).is_some() {
-        Standing::Cached
-    } else if let Some(error) = store.refusal(&key) {
+    // A refusal comes first: a copy that no longer fits the limit is cached but not served.
+    if let Some(error) = store.refusal(&key) {
         Standing::Refused(error.to_string())
+    } else if store.lookup(&key).is_some() {
+        Standing::Cached
     } else {
         Standing::NotCachedYet
     }
@@ -1355,6 +1356,33 @@ server:/export /home nfs4 rw 0 0
         assert!(
             said[0].starts_with("Could not cache gt:tool@1.0.0, so it loads from"),
             "{said:?}"
+        );
+    }
+
+    #[test]
+    fn a_cached_bundle_that_no_longer_fits_stands_refused() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundle = published(temp.path(), "gt", "tool", "1.0.0");
+        let deepest = (0..12).fold(bundle.root.clone(), |path, level| {
+            path.join(format!("nested_{level:05}"))
+        });
+        fs::create_dir_all(&deepest).expect("deep folders are created");
+        fs::write(deepest.join("leaf.txt"), "deep").expect("leaf is written");
+        let root = (0..9).fold(temp.path().join("store"), |path, level| {
+            path.join(format!("deep_root_{level}"))
+        });
+        let on = Store::open(&root)
+            .expect("store opens")
+            .with_long_paths(LongPaths::On);
+        let key = EntryKey::new("gt", "tool", "1.0.0").expect("key is valid");
+        on.ensure(&key, &bundle.root, &envoy_store::Quiet)
+            .expect("it is cached while long paths are on");
+        let off = on.clone().with_long_paths(LongPaths::Off);
+
+        assert_eq!(standing(&bundle, Some(&on)), Standing::Cached);
+        assert!(
+            matches!(standing(&bundle, Some(&off)), Standing::Refused(_)),
+            "cached, but not served while long paths are off"
         );
     }
 

@@ -140,24 +140,29 @@ Install the launcher for everyone with `install-envoy.ps1 -Scope Machine` from a
 
 Windows ships with a limit of 260 characters on a path, and many programs still stop there. The local cache keeps to 250 (its own folders count too). A bundle with deeper folders than that does not fit, so it runs from the share instead of the cache, with a warning the first time. Envoy itself can copy and read such folders either way; the limit exists for the programs a bundle starts from the cache.
 
-Turning on Windows long paths raises the limit to about 32,000 characters, and envoy then caches those bundles as well. Envoy reads the setting and never changes it, because that takes an administrator. To turn it on for a machine, set the group policy **Computer Configuration > Administrative Templates > System > Filesystem > Enable Win32 long paths** to Enabled, or set the registry value from an elevated prompt:
+Windows can lift the limit, from Windows 10 version 1607 on: turning on long paths raises it to about 32,000 characters, and envoy then caches those bundles as well. Envoy reads the setting and never changes it, because that takes an administrator. To turn it on for a machine, set the group policy **Computer Configuration > Administrative Templates > System > Filesystem > Enable Win32 long paths** to Enabled, or set the registry value from an elevated prompt:
 
 ```powershell
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -Type DWord
 ```
 
-Programs read the setting when they start, so restart the ones that are running; restarting the machine makes sure. Check the result with `en cache status` or `en --diagnose`, which print a `Long paths:` line. The installer prints the same line.
+Programs read the setting when they start, so restart the ones that are running; restarting the machine makes sure. Check the result with `en cache status`, which prints a `Long paths:` line, or `en --diagnose`, which prints a `long paths:` line in its cache section. The installer also says whether long paths are on.
 
 ```text
 Long paths: on (paths in the cache may reach about 32,000 characters; a program must declare itself long-path aware to open them)
 ```
 
+The line says `off` when the setting is off or not there, and `unknown` when it could not be read; both keep the 250-character limit. Only a value of `1` turns long paths on.
+
 What the setting does not do:
 
-- **A program must opt in.** Windows lets a program use long paths only if the program declares, in its manifest, that it can. Python 3.6 and newer does. A program that does not still fails on a path past 260 characters, and envoy cannot know which programs a bundle starts. If one of your tools fails on a deep path in the cache, that tool is the limit: publish the bundle with shorter paths.
+- **A program must opt in.** Windows lets a program use long paths only if the program declares, in its manifest, that it can. Python 3.6 and newer does, but a program that embeds Python, such as an application that hosts a pipeline, follows its own manifest. A program that does not opt in still fails on a path past 260 characters, and envoy cannot know which programs a bundle starts. If one of your tools fails on a deep path, that tool is the limit: publish the bundle with shorter paths. Running from the share does not avoid it, because a path on the share counts towards the limit as well.
 - **It does not change a machine you cannot change.** Those keep the 250-character limit. A shorter cache directory (`ENVOY_CACHE_ROOT`) or shorter paths in the bundle still work there.
 
-A bundle that was refused is cached on its next use once long paths are on, because envoy remembers a refusal only until the limit changes.
+The limit is checked again whenever it changes, in both directions:
+
+- A bundle that was refused is cached on its next use once long paths are on.
+- A bundle that was cached while they were on, and does not fit now that they are off (or on a machine that does not have them, for a cache that roams), is set aside: it runs from the share, says so once, and shows as `refused` in `en --diagnose` and in `en cache status`. Its copy stays in the cache and is removed by the usual cleanup once nothing has used it for the idle period.
 
 ## Who can change what
 

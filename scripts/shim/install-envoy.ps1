@@ -244,19 +244,32 @@ function Find-ShadowingEnvoy([string]$Folder) {
 # Says whether Windows lets paths pass 260 characters. A bundle whose paths would pass the limit
 # runs from the share instead of the local cache. This only reads the setting.
 function Write-LongPathsNote {
-    $enabled = $false
+    # Read the way envoy does: no value is the default, which is off, and only a DWORD of 1 turns
+    # long paths on. A value of another type, or one that cannot be read, is not trusted.
+    $state = 'off'
     try {
-        $setting = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -ErrorAction Stop
-        $enabled = ($setting.LongPathsEnabled -eq 1)
+        $value = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem', 'LongPathsEnabled', $null)
+        if ($value -is [int]) {
+            if ($value -eq 1) { $state = 'on' }
+        }
+        elseif ($null -ne $value) {
+            $state = 'unknown'
+        }
     }
     catch {
-        # No value is the default, which is off.
+        $state = 'unknown'
     }
-    if ($enabled) {
-        Write-Host 'Windows long paths: on (paths in the cache may reach about 32,000 characters).'
-    }
-    else {
-        Write-Host 'Windows long paths: off (paths in the cache are limited to 250 characters). A bundle with deeper folders then runs from the share. An administrator can turn long paths on: see "Long paths on Windows" in the team administration guide.'
+
+    switch ($state) {
+        'on' {
+            Write-Host 'Windows long paths: on (paths in the cache may reach about 32,000 characters).'
+        }
+        'unknown' {
+            Write-Host 'Windows long paths: unknown (the setting could not be read, so paths in the cache are limited to 250 characters as if it were off).'
+        }
+        default {
+            Write-Host 'Windows long paths: off (paths in the cache are limited to 250 characters). A bundle with deeper folders then runs from the share. An administrator can turn long paths on: see "Long paths on Windows" in the team administration guide.'
+        }
     }
 }
 

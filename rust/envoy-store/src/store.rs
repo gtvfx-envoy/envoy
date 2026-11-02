@@ -295,13 +295,30 @@ impl Store {
         read_state(&self.entry_path(key)).filter(is_usable)
     }
 
-    fn reuse(&self, key: &EntryKey) -> bool {
-        let entry = self.entry_path(key);
-        let usable = read_state(&entry).is_some_and(|state| is_usable(&state));
-        if usable {
-            touch_last_used(&entry, SystemTime::now());
+    /// Refuse a cached entry that would not be let in now.
+    ///
+    /// The limit on path length can fall after an entry was filled: Windows
+    /// long paths turned off, or a cache that roams to a machine without them.
+    /// Programs that do not support long paths could not open its deepest
+    /// files, so it is set aside like an entry that never fitted. It stays on
+    /// disk, and because a refused entry is not refreshed, prune removes it
+    /// once nobody has used it for the idle period.
+    ///
+    /// Says so once: the first refusal is recorded, so later runs stay quiet
+    /// and `envoy cache status` lists it.
+    fn check_still_fits(&self, key: &EntryKey, state: &EntryState) -> Result<()> {
+        // An entry filled before the depth was recorded passed the fixed limit then.
+        let Some(longest) = state.longest else {
+            return Ok(());
+        };
+        let longest = usize::try_from(longest).unwrap_or(usize::MAX);
+
+        let known = refusal::read(&self.refusal_path(key)).is_some();
+        let outcome = self.check_path_budget(key, longest, known);
+        if outcome.is_err() && !known {
+            self.remember_refusal(key, longest);
         }
-        usable
+        outcome
     }
 
     /// Make `key` available locally, copying it from `source` when needed.
@@ -331,7 +348,9 @@ impl Store {
                 announce(&mut announced, key, observer);
                 thread::sleep(LOCK_POLL);
             }
-            if self.reuse(key) {
+            if let Some(state) = self.lookup(key) {
+                self.check_still_fits(key, &state)?;
+                touch_last_used(&self.entry_path(key), SystemTime::now());
                 return Ok(Ensured {
                     path: self.entry_path(key),
                     outcome: filled.unwrap_or(Outcome::Hit),
@@ -356,7 +375,7 @@ impl Store {
                 announce(&mut announced, key, observer);
                 thread::sleep(LOCK_POLL);
             }
-            if !self.reuse(key) {
+            if self.lookup(key).is_none() {
                 filled = Some(self.fill(key, source, observer)?);
             }
             lock.unlock()?;
@@ -438,6 +457,7 @@ impl Store {
                 source: source.display().to_string(),
                 filled_at: unix_seconds(SystemTime::now()),
                 created_by: env!("CARGO_PKG_VERSION").to_string(),
+                longest: Some(plan.longest as u64),
             },
         )?;
 
@@ -538,12 +558,17 @@ impl Store {
     }
 
     /// Why `key` cannot be cached here, when an earlier run found that and it
-    /// still holds.
+    /// still holds, or when the entry that is cached no longer fits.
     ///
     /// Only reads: the record is neither refreshed nor removed.
     pub fn refusal(&self, key: &EntryKey) -> Option<StoreError> {
-        let record = refusal::read(&self.refusal_path(key))?;
-        self.check_path_budget(key, record.longest, true).err()
+        let longest = match refusal::read(&self.refusal_path(key)) {
+            Some(record) => record.longest,
+            // An entry that fitted when it was filled may not fit now, before
+            // any run has said so.
+            None => usize::try_from(self.lookup(key)?.longest?).unwrap_or(usize::MAX),
+        };
+        self.check_path_budget(key, longest, true).err()
     }
 
     /// Every refusal that still holds, ordered by identity.

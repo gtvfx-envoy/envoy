@@ -120,8 +120,9 @@ Show a full diagnostic report: discovered bundles and commands, resolved
 the current Stack and team config (`.envoy/team.json`),
 bundle cache location and state (and, beside each bundle, whether it is
 cached, not cached yet, refused because its paths are too long for the cache
-directory, or never cached; on Windows, also whether
-[long paths](../team-administration.md#long-paths-on-windows) are on), detected VCS backend (Git,
+directory, or never cached) and, on Windows, whether
+[long paths](../team-administration.md#long-paths-on-windows) are on (one line
+in the cache section, not one per bundle), detected VCS backend (Git,
 Perforce, or [Lore](https://github.com/EpicGames/lore)) with its pending
 change count, telemetry status, and bundle-root reachability (flagging
 network/UNC paths). Pass a command name to also see its full resolved

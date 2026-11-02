@@ -111,12 +111,17 @@ fn read_machine_setting() -> LongPaths {
     LongPaths::NotWindows
 }
 
+/// Where Windows keeps the setting. The "Enable Win32 long paths" group policy
+/// writes the same value.
+#[cfg(windows)]
+const LONG_PATHS_KEY: &str = r"SYSTEM\CurrentControlSet\Control\FileSystem";
+
+#[cfg(windows)]
+const LONG_PATHS_VALUE: &str = "LongPathsEnabled";
+
 #[cfg(windows)]
 fn read_machine_setting() -> LongPaths {
-    classify(read_machine_dword(
-        r"SYSTEM\CurrentControlSet\Control\FileSystem",
-        "LongPathsEnabled",
-    ))
+    classify(read_machine_dword(LONG_PATHS_KEY, LONG_PATHS_VALUE))
 }
 
 /// Read a DWORD value from under `HKEY_LOCAL_MACHINE`.
@@ -246,6 +251,76 @@ mod tests {
         let text = super::read_machine_dword(VERSION_KEY, "ProductName");
 
         assert!(text.is_err(), "{text:?}");
+    }
+
+    /// The text of an attribute in the opening tag of an element of an ADMX file.
+    #[cfg(windows)]
+    fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        let pattern = format!("{name}=\"");
+        let (at, _) = tag
+            .match_indices(&pattern)
+            .find(|(at, _)| tag[..*at].ends_with(char::is_whitespace))?;
+        tag[at + pattern.len()..].split('"').next()
+    }
+
+    // Which key and value are read is not something a test of the read itself
+    // can show: a typo reads a value that is not there, which is the default.
+    // Windows ships the definition of the policy that sets the value.
+    #[cfg(windows)]
+    #[test]
+    fn the_registry_names_are_the_ones_the_policy_that_sets_them_uses() {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let admx = std::path::Path::new(&root).join(r"PolicyDefinitions\FileSys.admx");
+        let Ok(text) = std::fs::read_to_string(&admx) else {
+            // Not every Windows image has the policy definitions.
+            return;
+        };
+        let name = text
+            .find(r#" name="LongPathsEnabled""#)
+            .expect("the policy is defined");
+        let open = text[..name].rfind("<policy").expect("it is a policy");
+        let close = name + text[name..].find('>').expect("the tag ends");
+        let tag = &text[open..close];
+
+        let key = attribute(tag, "key").expect("the policy names a key");
+        assert!(key.eq_ignore_ascii_case(super::LONG_PATHS_KEY), "{tag}");
+        assert_eq!(
+            attribute(tag, "valueName"),
+            Some(super::LONG_PATHS_VALUE),
+            "{tag}"
+        );
+    }
+
+    // The same value read by another program, on a machine where it is set this
+    // shows a read of the wrong place, and where it is not it shows the default.
+    // The names are written out here, so that a mistake in the ones the code
+    // reads is not repeated.
+    #[cfg(windows)]
+    #[test]
+    fn the_machines_setting_is_read_the_way_reg_query_reports_it() {
+        let output = std::process::Command::new("reg.exe")
+            .args([
+                "query",
+                r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem",
+                "/v",
+                "LongPathsEnabled",
+            ])
+            .output()
+            .expect("reg.exe runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let reported: Option<Vec<&str>> = text
+            .lines()
+            .find(|line| line.contains("LongPathsEnabled"))
+            .map(|line| line.split_whitespace().collect());
+
+        let expected = match reported.as_deref() {
+            None => LongPaths::Off,
+            Some([_, "REG_DWORD", "0x1"]) => LongPaths::On,
+            Some([_, "REG_DWORD", _]) => LongPaths::Off,
+            Some(_) => LongPaths::Unknown,
+        };
+
+        assert_eq!(super::read_machine_setting(), expected, "{text}");
     }
 
     #[cfg(not(windows))]
