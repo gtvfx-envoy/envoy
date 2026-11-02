@@ -969,7 +969,11 @@ fn an_entry_cached_while_long_paths_were_on_is_set_aside_when_they_go_off() {
         off.refusal(&key).is_some(),
         "diagnose can tell before any run has"
     );
-    assert!(off.refusals().is_empty(), "no run has recorded it yet");
+    assert_eq!(off.refusals().len(), 1, "and so can cache status");
+    assert!(
+        !off.refusal_path(&key).exists(),
+        "no run has recorded it yet"
+    );
 
     let error = off
         .ensure(&key, &source, &Quiet)
@@ -999,7 +1003,11 @@ fn an_entry_cached_while_long_paths_were_on_is_set_aside_when_they_go_off() {
         ),
         "the second run says nothing new: {again}"
     );
-    assert_eq!(off.refusals().len(), 1, "cache status lists it");
+    assert_eq!(
+        off.refusals().len(),
+        1,
+        "cache status lists it once, recorded or not"
+    );
     assert!(off.lookup(&key).is_some(), "the files stay for prune");
 
     let ensured = on
@@ -1033,6 +1041,131 @@ fn an_entry_filled_before_depths_were_recorded_is_served_whatever_the_limit() {
 
     assert!(matches!(ensured.outcome, Outcome::Hit));
     assert!(off.refusal(&key).is_none());
+}
+
+#[test]
+fn an_entry_found_to_fit_again_forgets_the_note_so_the_next_fall_is_said_again() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.clone().with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet)
+        .expect("it is cached while long paths are on");
+    let said = |store: &Store| {
+        let error = store
+            .ensure(&key, &source, &Quiet)
+            .expect_err("it does not fit");
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                remembered: false,
+                ..
+            }
+        )
+    };
+
+    assert!(said(&off), "the first fall is said");
+    assert!(!said(&off), "and not again");
+    assert!(off.refusal_path(&key).exists());
+
+    let hit = on.ensure(&key, &source, &Quiet).expect("it fits again");
+    assert!(matches!(hit.outcome, Outcome::Hit));
+    drop(hit);
+    assert!(!off.refusal_path(&key).exists(), "the note is forgotten");
+
+    assert!(said(&off), "the next fall is said again");
+}
+
+#[test]
+fn envoys_that_find_an_entry_no_longer_fits_together_say_so_once() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.clone().with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet)
+        .expect("it is cached while long paths are on");
+
+    for round in 0..10 {
+        let _ = fs::remove_file(off.refusal_path(&key));
+        // Stores opened apart take no turns with each other, like separate envoys.
+        let envoys: Vec<Store> = (0..8)
+            .map(|_| {
+                Store::open(off.root())
+                    .expect("store opens")
+                    .with_long_paths(LongPaths::Off)
+                    .with_path_cap(PathCap::Unset)
+            })
+            .collect();
+        let barrier = Barrier::new(envoys.len());
+
+        let errors: Vec<StoreError> = thread::scope(|scope| {
+            let running: Vec<_> = envoys
+                .iter()
+                .map(|envoy| {
+                    let (barrier, key, source) = (&barrier, &key, &source);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        envoy
+                            .ensure(key, source, &Quiet)
+                            .expect_err("it no longer fits")
+                    })
+                })
+                .collect();
+            running
+                .into_iter()
+                .map(|run| run.join().expect("the envoy finishes"))
+                .collect()
+        });
+
+        let said = errors
+            .iter()
+            .filter(|error| {
+                matches!(
+                    error,
+                    StoreError::PathTooLong {
+                        remembered: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            said, 1,
+            "round {round}: one envoy says so and the rest stay quiet"
+        );
+    }
+}
+
+#[test]
+fn an_entry_with_an_impossible_recorded_depth_is_set_aside_without_a_panic() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+    on.ensure(&key, &source, &Quiet).expect("it is cached");
+    // A damaged state file can hold any number.
+    let state_file = on.entry_path(&key).join(".store/state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state_file).expect("state reads"))
+            .expect("state parses");
+    state["longest"] = serde_json::json!(u64::MAX);
+    fs::write(&state_file, state.to_string()).expect("state is written");
+
+    let error = on
+        .ensure(&key, &source, &Quiet)
+        .expect_err("no path is that long");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                needed: usize::MAX,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(on.refusal(&key).is_some());
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! a warning each time.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -58,6 +58,47 @@ pub(crate) fn write(path: &Path, refusal: &Refusal) -> io::Result<()> {
     }
     let text = serde_json::to_string_pretty(refusal).expect("a refusal always serializes");
     fs::write(path, text)
+}
+
+/// What [`write_new`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Recorded {
+    /// The record is new: this call wrote it.
+    New,
+    /// A record was already there, and was left as it was.
+    AlreadyThere,
+    /// The record could not be written.
+    Failed,
+}
+
+/// Write a record unless one is already there.
+///
+/// Several envoys can find at once that a cached entry no longer fits. Only the
+/// one that creates the record is told it is new, so only that one says so.
+pub(crate) fn write_new(path: &Path, refusal: &Refusal) -> Recorded {
+    let text = serde_json::to_string_pretty(refusal).expect("a refusal always serializes");
+    let written = (|| {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        file.write_all(text.as_bytes())
+    })();
+
+    match written {
+        Ok(()) => Recorded::New,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Recorded::AlreadyThere,
+        Err(error) => {
+            tracing::debug!(
+                "Could not record that an entry does not fit at {}: {error}",
+                path.display()
+            );
+            Recorded::Failed
+        }
+    }
 }
 
 /// Delete records nobody has consulted for `max_idle`.

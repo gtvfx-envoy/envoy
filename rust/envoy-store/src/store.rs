@@ -15,8 +15,8 @@ use crate::key::EntryKey;
 use crate::lock::{Lease, LockFile};
 use crate::long_paths::LongPaths;
 use crate::observer::Observer;
-use crate::path_cap::PathCap;
-use crate::refusal::{self, Refusal, REFUSED_DIR};
+use crate::path_cap::{PathCap, PathLimit};
+use crate::refusal::{self, Recorded, Refusal, REFUSED_DIR};
 use crate::state::{
     self, is_kept, is_usable, last_used, read_state, touch_file, touch_last_used, unix_seconds,
     EntryState, STORE_FORMAT,
@@ -317,14 +317,16 @@ impl Store {
     /// Refuse a cached entry that would not be let in now.
     ///
     /// The limit on path length can fall after an entry was filled: Windows
-    /// long paths turned off, or a cache that roams to a machine without them.
-    /// Programs that do not support long paths could not open its deepest
-    /// files, so it is set aside like an entry that never fitted. It stays on
-    /// disk, and because a refused entry is not refreshed, prune removes it
-    /// once nobody has used it for the idle period.
+    /// long paths turned off, a cap set, or a cache that roams to a machine
+    /// without long paths. Programs that do not support long paths could not
+    /// open its deepest files, so it is set aside like an entry that never
+    /// fitted. It stays on disk, and because a refused entry is not refreshed,
+    /// prune removes it once nobody has used it for the idle period.
     ///
-    /// Says so once: the first refusal is recorded, so later runs stay quiet
-    /// and `envoy cache status` lists it.
+    /// Says so once. The first refusal is recorded, so later runs stay quiet,
+    /// and when several envoys meet the entry together only the one that
+    /// creates the record is told it is new. A run that finds the entry fits
+    /// again forgets the record, so a later fall is said once more.
     fn check_still_fits(&self, key: &EntryKey, state: &EntryState) -> Result<()> {
         // An entry filled before the depth was recorded passed the fixed limit then.
         let Some(longest) = state.longest else {
@@ -332,12 +334,24 @@ impl Store {
         };
         let longest = usize::try_from(longest).unwrap_or(usize::MAX);
 
-        let known = refusal::read(&self.refusal_path(key)).is_some();
-        let outcome = self.check_path_budget(key, longest, known);
-        if outcome.is_err() && !known {
-            self.remember_refusal(key, longest);
+        match self.check_path_budget(key, longest, false) {
+            Ok(()) => {
+                // Where nothing limits paths there is no note to forget, and
+                // looking for one would cost a file operation on every run.
+                if self.path_limit().is_some() {
+                    let _ = fs::remove_file(self.refusal_path(key));
+                }
+                Ok(())
+            }
+            Err(mut error) => {
+                let recorded =
+                    refusal::write_new(&self.refusal_path(key), &Refusal::path_too_long(longest));
+                if let StoreError::PathTooLong { remembered, .. } = &mut error {
+                    *remembered = recorded == Recorded::AlreadyThere;
+                }
+                Err(error)
+            }
         }
-        outcome
     }
 
     /// Make `key` available locally, copying it from `source` when needed.
@@ -524,6 +538,11 @@ impl Store {
         self.staging_dir().join(unique_name())
     }
 
+    /// The longest path the store creates, or `None` where nothing limits it.
+    fn path_limit(&self) -> Option<PathLimit> {
+        self.path_cap.apply(self.long_paths)
+    }
+
     /// Fail when the entry's longest path would not fit under the store root.
     ///
     /// The limit is measured where an entry finally lives, because that is
@@ -531,11 +550,17 @@ impl Store {
     /// store, and the standard library gives it the long-path prefix, so it may
     /// be longer.
     fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
-        let Some(limit) = self.path_cap.apply(self.long_paths) else {
+        let Some(limit) = self.path_limit() else {
             return Ok(());
         };
 
-        let needed = self.entry_path(key).as_os_str().len() + 1 + longest;
+        // A depth read from a damaged state file may be anything.
+        let needed = self
+            .entry_path(key)
+            .as_os_str()
+            .len()
+            .saturating_add(1)
+            .saturating_add(longest);
         if needed > limit.characters {
             return Err(StoreError::PathTooLong {
                 key: key.to_string(),
@@ -592,19 +617,31 @@ impl Store {
     }
 
     /// Every refusal that still holds, ordered by identity.
+    ///
+    /// That includes a cached entry that no longer fits, which the first run to
+    /// meet it records: it is a refusal from the moment the limit falls.
     pub fn refusals(&self) -> Vec<(EntryKey, StoreError)> {
-        let Ok(records) = fs::read_dir(self.refused_dir()) else {
-            return Vec::new();
+        let mut found: Vec<(EntryKey, StoreError)> = match fs::read_dir(self.refused_dir()) {
+            Ok(records) => records
+                .flatten()
+                .filter_map(|record| {
+                    let key =
+                        EntryKey::from_refusal_file_name(&record.file_name().to_string_lossy())?;
+                    let error = self.refusal(&key)?;
+                    Some((key, error))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         };
 
-        let mut found: Vec<(EntryKey, StoreError)> = records
-            .flatten()
-            .filter_map(|record| {
-                let key = EntryKey::from_refusal_file_name(&record.file_name().to_string_lossy())?;
-                let error = self.refusal(&key)?;
-                Some((key, error))
-            })
-            .collect();
+        for info in self.list() {
+            if found.iter().all(|(key, _)| *key != info.key) {
+                if let Some(error) = self.refusal(&info.key) {
+                    found.push((info.key, error));
+                }
+            }
+        }
+
         found.sort_by_key(|(key, _)| key.to_string());
         found
     }

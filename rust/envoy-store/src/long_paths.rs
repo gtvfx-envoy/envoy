@@ -121,7 +121,14 @@ const LONG_PATHS_VALUE: &str = "LongPathsEnabled";
 
 #[cfg(windows)]
 fn read_machine_setting() -> LongPaths {
-    classify(read_machine_dword(LONG_PATHS_KEY, LONG_PATHS_VALUE))
+    read_setting_with(read_machine_dword)
+}
+
+/// Read the setting through `read`, which is given the key and the name of the
+/// value, in that order.
+#[cfg(windows)]
+fn read_setting_with(read: impl FnOnce(&str, &str) -> Reading) -> LongPaths {
+    classify(read(LONG_PATHS_KEY, LONG_PATHS_VALUE))
 }
 
 /// Read a DWORD value from under `HKEY_LOCAL_MACHINE`.
@@ -253,14 +260,32 @@ mod tests {
         assert!(text.is_err(), "{text:?}");
     }
 
-    /// The text of an attribute in the opening tag of an element of an ADMX file.
+    /// The text of an attribute in the opening tag of an element of an ADMX file,
+    /// quoted either way, with any whitespace around the `=`.
     #[cfg(windows)]
     fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-        let pattern = format!("{name}=\"");
-        let (at, _) = tag
-            .match_indices(&pattern)
-            .find(|(at, _)| tag[..*at].ends_with(char::is_whitespace))?;
-        tag[at + pattern.len()..].split('"').next()
+        let mut rest = tag;
+        while let Some(at) = rest.find(name) {
+            let after = &rest[at + name.len()..];
+            if rest[..at].ends_with(char::is_whitespace) {
+                if let Some(value) = after.trim_start().strip_prefix('=') {
+                    let value = value.trim_start();
+                    let quote = value.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+                    return value[1..].split(quote).next();
+                }
+            }
+            rest = after;
+        }
+        None
+    }
+
+    /// The opening tag of the policy called `name` in an ADMX file.
+    #[cfg(windows)]
+    fn policy_tag<'a>(admx: &'a str, name: &str) -> Option<&'a str> {
+        admx.split("<policy")
+            .skip(1)
+            .filter_map(|element| element.split('>').next())
+            .find(|tag| attribute(tag, "name") == Some(name))
     }
 
     // Which key and value are read is not something a test of the read itself
@@ -275,12 +300,10 @@ mod tests {
             // Not every Windows image has the policy definitions.
             return;
         };
-        let name = text
-            .find(r#" name="LongPathsEnabled""#)
-            .expect("the policy is defined");
-        let open = text[..name].rfind("<policy").expect("it is a policy");
-        let close = name + text[name..].find('>').expect("the tag ends");
-        let tag = &text[open..close];
+        let Some(tag) = policy_tag(&text, "LongPathsEnabled") else {
+            // A Windows from before the policy existed has the file without it.
+            return;
+        };
 
         let key = attribute(tag, "key").expect("the policy names a key");
         assert!(key.eq_ignore_ascii_case(super::LONG_PATHS_KEY), "{tag}");
@@ -288,6 +311,44 @@ mod tests {
             attribute(tag, "valueName"),
             Some(super::LONG_PATHS_VALUE),
             "{tag}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_policy_tag_is_found_however_it_is_written() {
+        let admx = "<policyDefinitions revision='1.0'>\n<policies>\n\
+<policy name=\"Other\" class=\"Machine\" key=\"Wrong\" valueName=\"Wrong\">\n</policy>\n\
+<policy\n\tclass=\"Machine\"\n\tkey = 'SYSTEM\\Right'\n\tname='LongPathsEnabled'\n\
+\tvalueName = \"Right\" >\n</policy></policies></policyDefinitions>";
+
+        let tag = policy_tag(admx, "LongPathsEnabled").expect("the policy is found");
+
+        assert_eq!(attribute(tag, "key"), Some(r"SYSTEM\Right"));
+        assert_eq!(attribute(tag, "valueName"), Some("Right"));
+        assert_eq!(policy_tag(admx, "NotThere"), None);
+    }
+
+    // Which key and value the code reads, and in which order, is also not
+    // something the machine's own setting can show: with the two swapped, both
+    // read a value that is not there.
+    #[cfg(windows)]
+    #[test]
+    fn the_setting_is_read_from_the_policys_key_and_value_in_that_order() {
+        let mut asked = None;
+
+        let setting = super::read_setting_with(|key, name| {
+            asked = Some((key.to_string(), name.to_string()));
+            Ok(Some(1))
+        });
+
+        assert_eq!(setting, LongPaths::On);
+        assert_eq!(
+            asked,
+            Some((
+                super::LONG_PATHS_KEY.to_string(),
+                super::LONG_PATHS_VALUE.to_string()
+            ))
         );
     }
 
