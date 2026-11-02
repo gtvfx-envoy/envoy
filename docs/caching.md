@@ -6,14 +6,14 @@ Your own checkouts are never cached: a bundle without a `.bundle` marker always 
 
 ## What happens on the first run
 
-Bundles are copied up to four at a time, and the files of all of them share a fixed number of copy threads (16), so a stack with several large bundles does not wait for one before starting the next. Each bundle announces itself when it starts and again when it is done, and while any are copying, one line shows how far they have got:
+Bundles are copied up to four at a time. Their files go through one fixed set of copy threads (16), in the order the bundles asked for them, so the threads are not left idle between bundles, and each bundle is ready as soon as its own files are copied, without waiting for the others. Each bundle announces itself when it starts and again when it is done, and while any are copying, one line shows how far they have got:
 
 ```text
-envoy: caching ext:python@3.11.9-envoy.2 (5767 files, 140.4 MB) on first use...
 envoy: caching ext:pyside@6.11.1-envoy.1 (3802 files, 637.2 MB) on first use...
+envoy: caching ext:python@3.11.9-envoy.2 (5767 files, 140.4 MB) on first use...
   2 bundles: 46% (358.2 MB of 777.6 MB)
-envoy: cached ext:python@3.11.9-envoy.2 (140.4 MB) in 7.5 s
-envoy: cached ext:pyside@6.11.1-envoy.1 (637.2 MB) in 7.6 s
+envoy: cached ext:pyside@6.11.1-envoy.1 (637.2 MB) in 4.5 s
+envoy: cached ext:python@3.11.9-envoy.2 (140.4 MB) in 7.7 s
 ```
 
 The progress line is rewritten in place on a terminal and gone when the copies finish. When output goes to a file or a log, it is a line per bundle every few seconds instead.
