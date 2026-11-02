@@ -136,6 +136,52 @@ A team that needs its own pins sets `ENVOY_TEAM=<team>` on its machines. The lau
 
 Install the launcher for everyone with `install-envoy.ps1 -Scope Machine` from an elevated prompt. It is installed in `%ProgramFiles%\envoy\bin` and put at the front of the machine `PATH`; only administrators can write there, and the installer refuses a folder that anyone else could change (anything ordinary users could put in a folder on the machine `PATH` would run for administrators). All users of the machine then share one launcher, and each keeps their own cache of envoy versions and bundles under their own `~/.envoy`. A machine-wide launcher does not update itself; run the installer again to update it.
 
+## Long paths on Windows
+
+Windows ships with a limit of 260 characters on a path, and many programs still stop there. The local cache keeps to 250 (its own folders count too). A bundle with deeper folders than that does not fit, so it runs from the share instead of the cache, with a warning the first time. Envoy itself can copy and read such folders either way; the limit exists for the programs a bundle starts from the cache.
+
+Windows can lift the limit, from Windows 10 version 1607 on: turning on long paths raises it to about 32,000 characters, and envoy then caches those bundles as well. Envoy reads the setting and never changes it, because that takes an administrator. To turn it on for a machine, set the group policy **Computer Configuration > Administrative Templates > System > Filesystem > Enable Win32 long paths** to Enabled, or set the registry value from an elevated prompt:
+
+```powershell
+Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -Type DWord
+```
+
+Programs read the setting when they start, so restart the ones that are running; restarting the machine makes sure. Check the result with `en cache status`, which prints a `Long paths:` line, or `en --diagnose`, which prints a `long paths:` line in its cache section. The installer also says whether long paths are on.
+
+```text
+Long paths: on (paths in the cache may reach about 32,000 characters; a program must declare itself long-path aware to open them)
+```
+
+The line says `off` when the setting is off or not there, and `unknown` when it could not be read; both keep the 250-character limit. Only a value of `1` turns long paths on.
+
+What the setting does not do:
+
+- **A program must opt in.** Windows lets a program use long paths only if the program declares, in its manifest, that it can. Python 3.6 and newer does, but a program that embeds Python, such as an application that hosts a pipeline, follows its own manifest. A program that does not opt in still fails on a path past 260 characters, and envoy cannot know which programs a bundle starts. If one of your tools fails on a deep path, that tool is the limit: publish the bundle with shorter paths. Running from the share may not avoid it, because a path on the share counts towards the limit as well; `en --cache off <command>` runs one command from the share, which helps only where the share's path is the shorter one.
+- **It does not change a machine you cannot change.** Those keep the 250-character limit. A shorter cache directory (`ENVOY_CACHE_ROOT`) or shorter paths in the bundle still work there.
+
+The limit is checked again whenever it changes, in both directions, whether Windows long paths or [`ENVOY_CACHE_MAX_PATH`](#keeping-a-lower-limit) changed it:
+
+- A bundle that was refused is cached on its next use once the limit allows it.
+- A bundle that was cached under a higher limit, and does not fit now (long paths turned off, a lower `ENVOY_CACHE_MAX_PATH`, or a cache that roams to a machine without long paths), is set aside: it runs from the share, says so once, and shows as `refused` in `en --diagnose` and in `en cache status`. Its copy stays in the cache and is removed by the usual cleanup once nothing has used it for the idle period.
+
+### Keeping a lower limit
+
+Turning on long paths lets envoy cache bundles that a program without long-path support then cannot open. If some of your tools are like that, keep the cache to a lower limit than Windows allows, without changing the Windows setting: set the environment variable `ENVOY_CACHE_MAX_PATH` to a number of characters.
+
+```powershell
+[Environment]::SetEnvironmentVariable('ENVOY_CACHE_MAX_PATH', '250', 'Machine')
+```
+
+Envoy uses the lower of this and what Windows allows, so the variable can only lower the limit: it cannot raise it past what Windows allows, and with long paths off a value above 250 changes nothing. It applies to the bundles the cache holds, not to the launcher's own copies of envoy, which the launcher runs itself: a cap that was mistyped must not stop envoy from starting. It works the same on Linux and macOS, which have no limit of their own. Programs read environment variables when they start, so open a new terminal after setting it. An empty value means it is not set, and a value that is not a whole number above zero is ignored; the reports below say so.
+
+While it is set, `en cache status` prints a `Path limit:` line, and `en --diagnose` a `path limit:` line in its cache section. Nothing is printed while it is not set, because the `Long paths:` line already says what the limit is.
+
+```text
+Path limit: 250 characters, set by ENVOY_CACHE_MAX_PATH (without it the limit would be 32,000)
+```
+
+A bundle that does not fit under the cap is handled like one that does not fit under Windows' own limit, and its warning says that `ENVOY_CACHE_MAX_PATH` set the limit. Raising or removing the variable lets it in on its next use. Nested `en` commands that a bundle starts inherit the variable.
+
 ## Who can change what
 
 The launcher runs whatever the files on the share name, as the person who started it. Anyone who can write `redirect.yaml`, `shim/` or the version folders can therefore decide what runs on every machine. Give write access to those locations to the people who administer envoy, and read access to everyone else.

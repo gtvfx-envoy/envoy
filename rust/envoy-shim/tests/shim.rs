@@ -405,6 +405,37 @@ fn with_caching_off_envoy_runs_from_the_share() {
 }
 
 #[test]
+fn the_path_cap_does_not_keep_the_launcher_from_the_app_it_has_cached() {
+    let studio = Studio::new(&["v1"]);
+    let run = || {
+        studio
+            .shim("bob")
+            .env("ENVOY_CACHE_MAX_PATH", "30")
+            .output()
+            .expect("the shim runs")
+    };
+
+    let first = run();
+    // With the share gone, only the copy in the cache can start.
+    fs::remove_dir_all(&studio.share).expect("the share goes away");
+    let second = run();
+
+    for output in [&first, &second] {
+        assert!(output.status.success(), "{}", stderr(output));
+        assert!(
+            in_directory(&started_from(output), &studio.cache),
+            "stdout was:\n{}",
+            stdout(output)
+        );
+        assert!(
+            !stderr(output).contains("could not cache"),
+            "stderr was:\n{}",
+            stderr(output)
+        );
+    }
+}
+
+#[test]
 fn without_a_redirect_file_the_shim_says_what_to_set() {
     let studio = Studio::new(&["v1"]);
 

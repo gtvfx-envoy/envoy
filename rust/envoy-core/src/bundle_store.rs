@@ -16,7 +16,8 @@ use std::time::{Duration, SystemTime};
 
 pub use envoy_store::settings::{parse_switch, CACHE_ROOT_VAR, CACHE_SETTING, CACHE_VAR};
 pub use envoy_store::{
-    format_bytes, EntryInfo, Health, ProgressPrinter, PrunePolicy, PruneReport, Store, Verdict,
+    format_bytes, EntryInfo, Health, LongPaths, PathCap, ProgressPrinter, PrunePolicy, PruneReport,
+    Store, Verdict,
 };
 use envoy_store::{EntryKey, Lease, Observer, Outcome, StoreError};
 
@@ -416,13 +417,13 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
                     "Not cached, loads from {}: {error}",
                     bundle.root.display()
                 ),
-                StoreError::PathTooLong { .. } => warn(
+                StoreError::PathTooLong { capped, .. } => warn(
                     observer,
                     &bndlid,
                     format!(
-                        "Could not cache {key}, so it loads from {}: {error}. A shorter cache \
-                directory, set with ENVOY_CACHE_ROOT, would fit it",
-                        bundle.root.display()
+                        "Could not cache {key}, so it loads from {}: {error}. {}",
+                        bundle.root.display(),
+                        path_too_long_advice(store.long_paths(), capped)
                     ),
                 ),
                 _ => warn(
@@ -440,6 +441,19 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
                 result: Err(Stay::Failed(error.to_string())),
             }
         }
+    }
+}
+
+/// What to say after a "does not fit" warning so that the person can act on it.
+///
+/// `capped` is whether `ENVOY_CACHE_MAX_PATH` set the limit. It holds the limit
+/// down whatever Windows allows, so turning on long paths would not help.
+fn path_too_long_advice(long_paths: LongPaths, capped: bool) -> &'static str {
+    if long_paths.can_be_raised() && !capped {
+        "A shorter cache directory, set with ENVOY_CACHE_ROOT, would fit it, and so would turning \
+on Windows long paths (see 'Long paths on Windows' in the team administration guide)"
+    } else {
+        "A shorter cache directory, set with ENVOY_CACHE_ROOT, would fit it"
     }
 }
 
@@ -526,10 +540,11 @@ pub fn standing(bundle: &BundleInfo, store: Option<&Store>) -> Standing {
     let Some(store) = store else {
         return Standing::NotCachedYet;
     };
-    if store.lookup(&key).is_some() {
-        Standing::Cached
-    } else if let Some(error) = store.refusal(&key) {
+    // A refusal comes first: a copy that no longer fits the limit is cached but not served.
+    if let Some(error) = store.refusal(&key) {
         Standing::Refused(error.to_string())
+    } else if store.lookup(&key).is_some() {
+        Standing::Cached
     } else {
         Standing::NotCachedYet
     }
@@ -1345,6 +1360,99 @@ server:/export /home nfs4 rw 0 0
             said[0].starts_with("Could not cache gt:tool@1.0.0, so it loads from"),
             "{said:?}"
         );
+    }
+
+    #[test]
+    fn a_cached_bundle_that_no_longer_fits_stands_refused() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundle = published(temp.path(), "gt", "tool", "1.0.0");
+        let deepest = (0..12).fold(bundle.root.clone(), |path, level| {
+            path.join(format!("nested_{level:05}"))
+        });
+        fs::create_dir_all(&deepest).expect("deep folders are created");
+        fs::write(deepest.join("leaf.txt"), "deep").expect("leaf is written");
+        let root = (0..9).fold(temp.path().join("store"), |path, level| {
+            path.join(format!("deep_root_{level}"))
+        });
+        let on = Store::open(&root)
+            .expect("store opens")
+            .with_long_paths(LongPaths::On);
+        let key = EntryKey::new("gt", "tool", "1.0.0").expect("key is valid");
+        on.ensure(&key, &bundle.root, &envoy_store::Quiet)
+            .expect("it is cached while long paths are on");
+        let off = on.clone().with_long_paths(LongPaths::Off);
+
+        assert_eq!(standing(&bundle, Some(&on)), Standing::Cached);
+        assert!(
+            matches!(standing(&bundle, Some(&off)), Standing::Refused(_)),
+            "cached, but not served while long paths are off"
+        );
+    }
+
+    #[test]
+    fn a_bundle_that_does_not_fit_says_how_to_make_it_fit_while_long_paths_are_off() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let root = (0..20).fold(temp.path().join("store"), |path, level| {
+            path.join(format!("deep_root_{level}"))
+        });
+        let store = Store::open(&root)
+            .expect("store opens")
+            .with_long_paths(LongPaths::Off);
+        let said = Said::default();
+
+        let offered = offer(bundles[0].clone(), &store, &said);
+
+        assert!(matches!(offered.result, Err(Stay::Failed(_))));
+        let said = said.0.into_inner().expect("lock is free");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("ENVOY_CACHE_ROOT"), "{said:?}");
+        assert!(said[0].contains("Windows long paths"), "{said:?}");
+    }
+
+    #[test]
+    fn long_paths_are_only_suggested_where_turning_them_on_would_help() {
+        for raisable in [LongPaths::Off, LongPaths::Unknown] {
+            assert!(path_too_long_advice(raisable, false).contains("Windows long paths"));
+            // A cap holds the limit down whatever Windows allows.
+            let capped = path_too_long_advice(raisable, true);
+            assert!(capped.contains("ENVOY_CACHE_ROOT"), "{capped}");
+            assert!(!capped.contains("long paths"), "{capped}");
+        }
+        for other in [LongPaths::On, LongPaths::NotWindows] {
+            for capped in [false, true] {
+                let advice = path_too_long_advice(other, capped);
+                assert!(advice.contains("ENVOY_CACHE_ROOT"), "{advice}");
+                assert!(!advice.contains("long paths"), "{advice}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bundle_the_cap_refuses_names_the_cap_and_does_not_suggest_long_paths() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let root = (0..20).fold(temp.path().join("store"), |path, level| {
+            path.join(format!("deep_root_{level}"))
+        });
+        // Long paths are on, so only the cap can refuse a path this deep.
+        let store = Store::open(&root)
+            .expect("store opens")
+            .with_long_paths(LongPaths::On)
+            .with_path_cap(PathCap::Limit(200));
+        let said = Said::default();
+
+        let offered = offer(bundles[0].clone(), &store, &said);
+
+        assert!(matches!(offered.result, Err(Stay::Failed(_))));
+        let said = said.0.into_inner().expect("lock is free");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("the limit is 200 (set by ENVOY_CACHE_MAX_PATH)"),
+            "{said:?}"
+        );
+        assert!(said[0].contains("ENVOY_CACHE_ROOT"), "{said:?}");
+        assert!(!said[0].contains("long paths"), "{said:?}");
     }
 
     /// Counts what fills report.

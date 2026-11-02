@@ -42,6 +42,13 @@ pub struct EntryState {
     pub filled_at: u64,
     /// Version of envoy that filled the entry.
     pub created_by: String,
+    /// Length of the longest path in the entry, relative to its root.
+    ///
+    /// It lets the entry be checked again when the limit on path length falls,
+    /// for example when Windows long paths are turned off. An entry filled
+    /// before this was recorded has none, and passed the fixed limit then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub longest: Option<u64>,
 }
 
 pub(crate) fn state_dir(entry: &Path) -> PathBuf {

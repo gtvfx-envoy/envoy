@@ -13,8 +13,10 @@ use crate::error::{io_error, Result, StoreError};
 use crate::fill;
 use crate::key::EntryKey;
 use crate::lock::{Lease, LockFile};
+use crate::long_paths::LongPaths;
 use crate::observer::Observer;
-use crate::refusal::{self, Refusal, REFUSED_DIR};
+use crate::path_cap::{PathCap, PathLimit};
+use crate::refusal::{self, Recorded, Refusal, REFUSED_DIR};
 use crate::state::{
     self, is_kept, is_usable, last_used, read_state, touch_file, touch_last_used, unix_seconds,
     EntryState, STORE_FORMAT,
@@ -32,13 +34,6 @@ const ORPHAN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Free space kept in reserve beyond the size of a fill.
 const SPACE_HEADROOM: u64 = 64 * 1024 * 1024;
 
-/// Longest path (in characters) the store will create on Windows, leaving
-/// room below the classic 260 limit that many tools still honour.
-///
-/// It applies to where an entry finally lives, because that is where other
-/// programs open files. A staging path is only ever used by the store, and the
-/// standard library gives it the long-path prefix, so it may be longer.
-const WINDOWS_PATH_LIMIT: usize = 250;
 /// Times `ensure` will start over when an entry is removed under it.
 const ENSURE_ATTEMPTS: u32 = 3;
 
@@ -191,6 +186,10 @@ pub struct Verdict {
 #[derive(Clone, Debug)]
 pub struct Store {
     root: PathBuf,
+    /// What the machine allows for the length of a path, which the guard follows.
+    long_paths: LongPaths,
+    /// A lower limit a person asked for, which the guard follows as well.
+    path_cap: PathCap,
     /// Shared by clones, so every thread using this store is coordinated.
     coordinator: Arc<Coordinator>,
 }
@@ -227,8 +226,40 @@ impl Store {
 
         Ok(Self {
             root,
+            long_paths: LongPaths::detect(),
+            path_cap: PathCap::from_environment(),
             coordinator: Arc::default(),
         })
+    }
+
+    /// Keep to what `long_paths` allows instead of what this machine reports.
+    ///
+    /// A store reads the machine's setting when it is opened. This is for a
+    /// caller that knows better, and for tests, which must not depend on the
+    /// machine they run on.
+    pub fn with_long_paths(mut self, long_paths: LongPaths) -> Self {
+        self.long_paths = long_paths;
+        self
+    }
+
+    /// Return what the store allows for the length of a path.
+    pub fn long_paths(&self) -> LongPaths {
+        self.long_paths
+    }
+
+    /// Keep to `cap` instead of what `ENVOY_CACHE_MAX_PATH` says.
+    ///
+    /// Like [`Store::with_long_paths`], this is for a caller that knows better
+    /// and for tests.
+    pub fn with_path_cap(mut self, cap: PathCap) -> Self {
+        self.path_cap = cap;
+        self
+    }
+
+    /// Return the lower limit on the length of a path that was asked for, which
+    /// applies besides what the machine allows.
+    pub fn path_cap(&self) -> &PathCap {
+        &self.path_cap
     }
 
     /// Open the store at `root` only if it already exists.
@@ -283,13 +314,44 @@ impl Store {
         read_state(&self.entry_path(key)).filter(is_usable)
     }
 
-    fn reuse(&self, key: &EntryKey) -> bool {
-        let entry = self.entry_path(key);
-        let usable = read_state(&entry).is_some_and(|state| is_usable(&state));
-        if usable {
-            touch_last_used(&entry, SystemTime::now());
+    /// Refuse a cached entry that would not be let in now.
+    ///
+    /// The limit on path length can fall after an entry was filled: Windows
+    /// long paths turned off, a cap set, or a cache that roams to a machine
+    /// without long paths. Programs that do not support long paths could not
+    /// open its deepest files, so it is set aside like an entry that never
+    /// fitted. It stays on disk, and because a refused entry is not refreshed,
+    /// prune removes it once nobody has used it for the idle period.
+    ///
+    /// Says so once. The first refusal is recorded, so later runs stay quiet,
+    /// and when several envoys meet the entry together only the one that
+    /// creates the record is told it is new. A run that finds the entry fits
+    /// again forgets the record, so a later fall is said once more.
+    fn check_still_fits(&self, key: &EntryKey, state: &EntryState) -> Result<()> {
+        // An entry filled before the depth was recorded passed the fixed limit then.
+        let Some(longest) = state.longest else {
+            return Ok(());
+        };
+        let longest = usize::try_from(longest).unwrap_or(usize::MAX);
+
+        match self.check_path_budget(key, longest, false) {
+            Ok(()) => {
+                // Where nothing limits paths there is no note to forget, and
+                // looking for one would cost a file operation on every run.
+                if self.path_limit().is_some() {
+                    let _ = fs::remove_file(self.refusal_path(key));
+                }
+                Ok(())
+            }
+            Err(mut error) => {
+                let recorded =
+                    refusal::write_new(&self.refusal_path(key), &Refusal::path_too_long(longest));
+                if let StoreError::PathTooLong { remembered, .. } = &mut error {
+                    *remembered = recorded == Recorded::AlreadyThere;
+                }
+                Err(error)
+            }
         }
-        usable
     }
 
     /// Make `key` available locally, copying it from `source` when needed.
@@ -319,7 +381,9 @@ impl Store {
                 announce(&mut announced, key, observer);
                 thread::sleep(LOCK_POLL);
             }
-            if self.reuse(key) {
+            if let Some(state) = self.lookup(key) {
+                self.check_still_fits(key, &state)?;
+                touch_last_used(&self.entry_path(key), SystemTime::now());
                 return Ok(Ensured {
                     path: self.entry_path(key),
                     outcome: filled.unwrap_or(Outcome::Hit),
@@ -344,7 +408,7 @@ impl Store {
                 announce(&mut announced, key, observer);
                 thread::sleep(LOCK_POLL);
             }
-            if !self.reuse(key) {
+            if self.lookup(key).is_none() {
                 filled = Some(self.fill(key, source, observer)?);
             }
             lock.unlock()?;
@@ -426,6 +490,7 @@ impl Store {
                 source: source.display().to_string(),
                 filled_at: unix_seconds(SystemTime::now()),
                 created_by: env!("CARGO_PKG_VERSION").to_string(),
+                longest: Some(plan.longest as u64),
             },
         )?;
 
@@ -473,18 +538,35 @@ impl Store {
         self.staging_dir().join(unique_name())
     }
 
-    /// Fail when the entry's longest path would not fit under the store root.
-    fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
-        if !cfg!(windows) {
-            return Ok(());
-        }
+    /// The longest path the store creates, or `None` where nothing limits it.
+    fn path_limit(&self) -> Option<PathLimit> {
+        self.path_cap.apply(self.long_paths)
+    }
 
-        let needed = self.entry_path(key).as_os_str().len() + 1 + longest;
-        if needed > WINDOWS_PATH_LIMIT {
+    /// Fail when the entry's longest path would not fit under the store root.
+    ///
+    /// The limit is measured where an entry finally lives, because that is
+    /// where other programs open files. A staging path is only ever used by the
+    /// store, and the standard library gives it the long-path prefix, so it may
+    /// be longer.
+    fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
+        let Some(limit) = self.path_limit() else {
+            return Ok(());
+        };
+
+        // A depth read from a damaged state file may be anything.
+        let needed = self
+            .entry_path(key)
+            .as_os_str()
+            .len()
+            .saturating_add(1)
+            .saturating_add(longest);
+        if needed > limit.characters {
             return Err(StoreError::PathTooLong {
                 key: key.to_string(),
                 needed,
-                limit: WINDOWS_PATH_LIMIT,
+                limit: limit.characters,
+                capped: limit.capped,
                 root: self.root.clone(),
                 remembered,
             });
@@ -521,28 +603,45 @@ impl Store {
     }
 
     /// Why `key` cannot be cached here, when an earlier run found that and it
-    /// still holds.
+    /// still holds, or when the entry that is cached no longer fits.
     ///
     /// Only reads: the record is neither refreshed nor removed.
     pub fn refusal(&self, key: &EntryKey) -> Option<StoreError> {
-        let record = refusal::read(&self.refusal_path(key))?;
-        self.check_path_budget(key, record.longest, true).err()
+        let longest = match refusal::read(&self.refusal_path(key)) {
+            Some(record) => record.longest,
+            // An entry that fitted when it was filled may not fit now, before
+            // any run has said so.
+            None => usize::try_from(self.lookup(key)?.longest?).unwrap_or(usize::MAX),
+        };
+        self.check_path_budget(key, longest, true).err()
     }
 
     /// Every refusal that still holds, ordered by identity.
+    ///
+    /// That includes a cached entry that no longer fits, which the first run to
+    /// meet it records: it is a refusal from the moment the limit falls.
     pub fn refusals(&self) -> Vec<(EntryKey, StoreError)> {
-        let Ok(records) = fs::read_dir(self.refused_dir()) else {
-            return Vec::new();
+        let mut found: Vec<(EntryKey, StoreError)> = match fs::read_dir(self.refused_dir()) {
+            Ok(records) => records
+                .flatten()
+                .filter_map(|record| {
+                    let key =
+                        EntryKey::from_refusal_file_name(&record.file_name().to_string_lossy())?;
+                    let error = self.refusal(&key)?;
+                    Some((key, error))
+                })
+                .collect(),
+            Err(_) => Vec::new(),
         };
 
-        let mut found: Vec<(EntryKey, StoreError)> = records
-            .flatten()
-            .filter_map(|record| {
-                let key = EntryKey::from_refusal_file_name(&record.file_name().to_string_lossy())?;
-                let error = self.refusal(&key)?;
-                Some((key, error))
-            })
-            .collect();
+        for info in self.list() {
+            if found.iter().all(|(key, _)| *key != info.key) {
+                if let Some(error) = self.refusal(&info.key) {
+                    found.push((info.key, error));
+                }
+            }
+        }
+
         found.sort_by_key(|(key, _)| key.to_string());
         found
     }

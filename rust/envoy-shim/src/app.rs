@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use envoy_config::expand::expand_source;
 use envoy_store::settings::Location;
-use envoy_store::{EntryKey, Lease, Observer, Outcome, Store};
+use envoy_store::{EntryKey, Lease, Observer, Outcome, PathCap, Store};
 
 use crate::error::ShimError;
 use crate::version::{reported_by, same_version};
@@ -186,7 +186,10 @@ fn open_store(location: &Location) -> Option<Store> {
         return None;
     }
     match Store::open(&location.root) {
-        Ok(store) => Some(store),
+        // A cap on the length of a path is for the programs that bundles start.
+        // The launcher runs the app itself, and a cap that was mistyped must not
+        // be able to stop envoy from starting, least of all from a copy it has.
+        Ok(store) => Some(store.with_path_cap(PathCap::Unset)),
         Err(error) => {
             eprintln!("envoy: caching is unavailable, so envoy runs from its source: {error}");
             None

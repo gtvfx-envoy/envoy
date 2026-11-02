@@ -21,6 +21,12 @@ pub const CACHE_ROOT_VAR: &str = "ENVOY_CACHE_ROOT";
 /// in flight than the default to fill its link.
 pub const CACHE_THREADS_VAR: &str = "ENVOY_CACHE_THREADS";
 
+/// The most characters a path in the store may have, for machines where some
+/// programs cannot open the long paths Windows allows once it is set up for
+/// them. It only lowers the limit: what the machine allows still applies. See
+/// [`PathCap`](crate::PathCap).
+pub const CACHE_MAX_PATH_VAR: &str = "ENVOY_CACHE_MAX_PATH";
+
 /// Files in flight when [`CACHE_THREADS_VAR`] does not say otherwise. On a
 /// gigabit share, 16 filled a studio stack about a fifth faster than 8, while 32
 /// was slower again.

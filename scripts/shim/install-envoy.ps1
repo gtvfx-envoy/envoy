@@ -241,6 +241,51 @@ function Find-ShadowingEnvoy([string]$Folder) {
     return $null
 }
 
+# Says whether Windows lets paths pass 260 characters. A bundle whose paths would pass the limit
+# runs from the share instead of the local cache. This only reads the setting.
+function Write-LongPathsNote {
+    # Read the way envoy does: no value is the default, which is off, and only a DWORD of 1 turns
+    # long paths on. A value of another type, or one that cannot be read, is not trusted.
+    $state = 'off'
+    try {
+        $value = [Microsoft.Win32.Registry]::GetValue('HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\FileSystem', 'LongPathsEnabled', $null)
+        if ($value -is [int]) {
+            if ($value -eq 1) { $state = 'on' }
+        }
+        elseif ($null -ne $value) {
+            $state = 'unknown'
+        }
+    }
+    catch {
+        $state = 'unknown'
+    }
+
+    switch ($state) {
+        'on' {
+            Write-Host 'Windows long paths: on (paths in the cache may reach about 32,000 characters).'
+        }
+        'unknown' {
+            Write-Host 'Windows long paths: unknown (the setting could not be read, so paths in the cache are limited to 250 characters as if it were off).'
+        }
+        default {
+            Write-Host 'Windows long paths: off (paths in the cache are limited to 250 characters). A bundle with deeper folders then runs from the share. An administrator can turn long paths on: see "Long paths on Windows" in the team administration guide.'
+        }
+    }
+
+    # A cap in the environment can lower the limit below what is said above. It is read
+    # the way envoy reads it: empty is not set, and only a whole number above zero is a cap.
+    $cap = "$env:ENVOY_CACHE_MAX_PATH".Trim()
+    if ($cap) {
+        [uint64]$limit = 0
+        if ($cap -match '^\+?[0-9]+$' -and [uint64]::TryParse($cap.TrimStart('+'), [ref]$limit) -and $limit -gt 0) {
+            Write-Host "ENVOY_CACHE_MAX_PATH is set to $limit, which can lower that limit. 'envoy cache status' shows the limit envoy uses."
+        }
+        else {
+            Write-Host "ENVOY_CACHE_MAX_PATH is set to '$cap', which is not a whole number above zero, so envoy ignores it."
+        }
+    }
+}
+
 function Install-Launcher {
     $launcher = Find-Launcher $Source
     if ($Scope -eq 'Machine') { Assert-Administrator }
@@ -276,6 +321,8 @@ function Install-Launcher {
             Write-Warning "A new terminal will find $shadow before this launcher. Remove its folder from PATH, or put $bin ahead of it."
         }
     }
+
+    Write-LongPathsNote
 
     if ($env:ENVOY_CONFIG_PROD -or $env:ENVOY_REDIRECT_CONFIG) {
         Write-Host ''
