@@ -552,25 +552,35 @@ mod tests {
 
     #[test]
     fn a_call_ends_when_its_own_jobs_do_whatever_another_call_is_doing() {
-        let pool = Arc::new(pool(3));
-        let (first_waits, first_waiting) = mpsc::channel();
-        let (second_waits, second_waiting) = mpsc::channel();
+        // Two workers, so each of the first call's two jobs has one to itself.
+        let pool = Arc::new(pool(2));
+        let job_1_running = Gate::new();
+        let held_up = Gate::new();
+        let second_held_up = Gate::new();
+        let (first_running, first_is_running) = mpsc::channel();
+        let (second_started, second_is_running) = mpsc::channel();
         let (first_ended, first_end) = mpsc::channel();
         let (second_ended, second_end) = mpsc::channel();
-        let first_gate = Gate::new();
-        let second_gate = Gate::new();
 
-        // The first call: one quick job, and one that waits to be let go.
+        // The first call: job 0 returns only once job 1 is running, which has to
+        // be on the other worker, and job 1 then stays until it is let go.
         let first = {
-            let (pool, gate) = (Arc::clone(&pool), Arc::clone(&first_gate));
+            let (pool, job_1_running, held_up) = (
+                Arc::clone(&pool),
+                Arc::clone(&job_1_running),
+                Arc::clone(&held_up),
+            );
             thread::spawn(move || {
                 let result: Result<(), String> = run_jobs(
                     &pool,
                     2,
                     move |index| {
-                        if index == 1 {
-                            first_waits.send(()).expect("test is listening");
-                            gate.wait();
+                        if index == 0 {
+                            job_1_running.wait();
+                        } else {
+                            job_1_running.open();
+                            first_running.send(()).expect("test is listening");
+                            held_up.wait();
                         }
                         Ok(())
                     },
@@ -579,20 +589,21 @@ mod tests {
                 first_ended.send(result).expect("test is listening");
             })
         };
-        first_waiting
+        first_is_running
             .recv_timeout(LIMIT)
             .expect("the first call's second job started");
 
-        // The second call starts while the first still waits, and its job waits too.
+        // The second call starts while job 1 still holds one worker, and its job
+        // takes the other one, the worker job 0 has just left.
         let second = {
-            let (pool, gate) = (Arc::clone(&pool), Arc::clone(&second_gate));
+            let (pool, second_held_up) = (Arc::clone(&pool), Arc::clone(&second_held_up));
             thread::spawn(move || {
                 let result: Result<(), String> = run_jobs(
                     &pool,
                     1,
                     move |_| {
-                        second_waits.send(()).expect("test is listening");
-                        gate.wait();
+                        second_started.send(()).expect("test is listening");
+                        second_held_up.wait();
                         Ok(())
                     },
                     |index| format!("job {index} stopped"),
@@ -600,12 +611,12 @@ mod tests {
                 second_ended.send(result).expect("test is listening");
             })
         };
-        second_waiting
+        second_is_running
             .recv_timeout(LIMIT)
             .expect("the second call's job started");
 
-        // Letting the first go ends the first call, though the second is still busy.
-        first_gate.open();
+        // Letting job 1 go ends the first call, though the second is still busy.
+        held_up.open();
         let result = first_end
             .recv_timeout(LIMIT)
             .expect("the first call ended without waiting for the second");
@@ -615,27 +626,75 @@ mod tests {
             "the second call is still waiting"
         );
 
-        second_gate.open();
+        second_held_up.open();
         assert_eq!(second_end.recv_timeout(LIMIT).expect("second ends"), Ok(()));
         first.join().expect("first thread ends");
         second.join().expect("second thread ends");
     }
 
     #[test]
-    fn the_first_failure_is_returned_once_every_job_that_started_has_ended() {
+    fn a_failure_is_returned_once_every_job_that_started_has_ended() {
+        let pool = Arc::new(pool(2));
+        let slow_started = Gate::new();
+        let slow_let_go = Gate::new();
+        let (failed, failure_seen) = mpsc::channel();
+        let (ended, end) = mpsc::channel();
+
+        // Job 0 is slow, and job 1 fails once job 0 is running.
+        let call = {
+            let (pool, slow_started, slow_let_go) = (
+                Arc::clone(&pool),
+                Arc::clone(&slow_started),
+                Arc::clone(&slow_let_go),
+            );
+            thread::spawn(move || {
+                let result: Result<(), String> = run_jobs(
+                    &pool,
+                    2,
+                    move |index| {
+                        if index == 0 {
+                            slow_started.open();
+                            slow_let_go.wait();
+                            Ok(())
+                        } else {
+                            slow_started.wait();
+                            failed.send(()).expect("test is listening");
+                            Err("job 1 failed".to_string())
+                        }
+                    },
+                    |index| format!("job {index} stopped"),
+                );
+                ended.send(result).expect("test is listening");
+            })
+        };
+
+        // The failure is in, and job 0 still runs: the call must not return yet.
+        failure_seen.recv_timeout(LIMIT).expect("job 1 failed");
+        assert!(
+            end.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the call returned while a job was still running"
+        );
+
+        slow_let_go.open();
+        assert_eq!(
+            end.recv_timeout(LIMIT).expect("the call ends"),
+            Err("job 1 failed".to_string())
+        );
+        call.join().expect("thread ends");
+    }
+
+    #[test]
+    fn a_failure_stops_the_jobs_that_have_not_started() {
         let pool = pool(4);
-        let running = Arc::new(AtomicUsize::new(0));
         let started = Arc::new(AtomicUsize::new(0));
-        let (job_running, job_started) = (Arc::clone(&running), Arc::clone(&started));
+        let job_started = Arc::clone(&started);
 
         let result: Result<(), String> = run_jobs(
             &pool,
             2000,
             move |index| {
-                job_running.fetch_add(1, Ordering::SeqCst);
                 job_started.fetch_add(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(2));
-                job_running.fetch_sub(1, Ordering::SeqCst);
                 if index == 5 {
                     Err("job 5 failed".to_string())
                 } else {
@@ -646,7 +705,6 @@ mod tests {
         );
 
         assert_eq!(result, Err("job 5 failed".to_string()));
-        assert_eq!(running.load(Ordering::SeqCst), 0, "a job is still running");
         assert!(
             started.load(Ordering::SeqCst) < 1000,
             "the jobs that had not started were not skipped"
