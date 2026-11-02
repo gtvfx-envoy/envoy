@@ -24,7 +24,7 @@ The installer:
 
 - copies the launcher to `~/.envoy/bin` (`%USERPROFILE%\.envoy\bin` on Windows) as `envoy` and `en`;
 - puts that folder at the front of `PATH` (on Linux and macOS, only with `--modify-profile`; without it, the installer prints the line to add to your profile);
-- on Windows, says whether [long paths](team-administration.md#long-paths-on-windows) are on, which decides how deep a bundle's folders may be and still be cached;
+- on Windows, says whether [long paths](team-administration.md#long-paths-on-windows) are on, which decides how deep a bundle's folders may be and still be cached, and mentions `ENVOY_CACHE_MAX_PATH` when it is set, because that can lower the limit;
 - prints which envoy version you are pinned to.
 
 Open a new terminal afterwards so `PATH` is picked up. Installing again replaces the launcher, also while it is running, and uninstalling removes it:

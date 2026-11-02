@@ -67,6 +67,7 @@ fn isolated(mut command: Command) -> Command {
         .env_remove("ENVOY_CACHE_ROOT")
         .env_remove("ENVOY_CACHE_MAX_IDLE_DAYS")
         .env_remove("ENVOY_CACHE_MAX_SIZE")
+        .env_remove("ENVOY_CACHE_MAX_PATH")
         .env_remove("ENVOY_BUNDLE_CACHE")
         .env_remove("ENVOY_DISABLE_BUNDLE_CACHE")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
@@ -1030,6 +1031,123 @@ fn cache_actions_report_and_clean_up_without_a_stack() {
         .success();
     assert!(stdout_text(&clear).contains("Removed 1 entry"));
     assert!(!cache_root.join("bundles/gt/tool/1.0.0").exists());
+}
+
+#[test]
+fn the_path_limit_is_reported_only_while_a_cap_is_set() {
+    let scratch = ScratchDir::new("envoy_path_cap_report");
+    let (stack, _, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let status = |cap: Option<&str>| {
+        let mut command = caching_command(&cache_root);
+        if let Some(cap) = cap {
+            command.env("ENVOY_CACHE_MAX_PATH", cap);
+        }
+        stdout_text(&command.args(["cache", "status"]).assert().success())
+    };
+    let diagnose = |cap: Option<&str>| {
+        let mut command = caching_command(&cache_root);
+        if let Some(cap) = cap {
+            command.env("ENVOY_CACHE_MAX_PATH", cap);
+        }
+        stdout_text(
+            &command
+                .arg("--stack")
+                .arg(&stack)
+                .arg("--diagnose")
+                .assert()
+                .success(),
+        )
+    };
+
+    assert!(!status(None).contains("Path limit:"));
+    assert!(
+        !status(Some("")).contains("Path limit:"),
+        "empty is not set"
+    );
+    assert!(!diagnose(None).contains("  path limit: "));
+
+    let capped = status(Some("250"));
+    assert!(
+        capped.contains("Path limit: 250 characters, set by ENVOY_CACHE_MAX_PATH"),
+        "stdout was:\n{capped}"
+    );
+    let diagnosed = diagnose(Some("250"));
+    assert!(
+        diagnosed.contains("  path limit: 250 characters, set by ENVOY_CACHE_MAX_PATH"),
+        "stdout was:\n{diagnosed}"
+    );
+
+    for report in [status(Some("lots")), diagnose(Some("lots"))] {
+        assert!(
+            report.contains("ENVOY_CACHE_MAX_PATH is 'lots'")
+                && report.contains("so it is ignored"),
+            "stdout was:\n{report}"
+        );
+    }
+}
+
+#[test]
+fn a_bundle_deeper_than_the_path_cap_runs_from_its_source_until_the_cap_is_lifted() {
+    let scratch = ScratchDir::new("envoy_path_cap_run");
+    let (stack, tool, _) = published_studio(&scratch);
+    let cache_root = scratch.path().join("cache");
+    let run = |cap: Option<&str>| {
+        let mut command = caching_command(&cache_root);
+        if let Some(cap) = cap {
+            command.env("ENVOY_CACHE_MAX_PATH", cap);
+        }
+        command
+            .arg("--stack")
+            .arg(&stack)
+            .arg("show")
+            .assert()
+            .success()
+    };
+
+    // No path in the store can be as short as this, so nothing is cached.
+    let capped = run(Some("40"));
+    let stderr = stderr_text(&capped);
+    assert!(
+        stderr.contains("(set by ENVOY_CACHE_MAX_PATH)"),
+        "stderr was:\n{stderr}"
+    );
+    assert!(stderr.contains("ENVOY_CACHE_ROOT"), "stderr was:\n{stderr}");
+    assert!(
+        ran_from(&capped, &tool),
+        "it runs from the share, stdout was:\n{}",
+        stdout_text(&capped)
+    );
+    assert!(!cache_root.join("bundles/gt/tool/1.0.0").exists());
+
+    // The refusal is remembered, so the next run does not say it again.
+    let again = run(Some("40"));
+    assert!(
+        !stderr_text(&again).contains("ENVOY_CACHE_MAX_PATH"),
+        "stderr was:\n{}",
+        stderr_text(&again)
+    );
+
+    let status = caching_command(&cache_root)
+        .env("ENVOY_CACHE_MAX_PATH", "40")
+        .args(["cache", "status"])
+        .assert()
+        .success();
+    let listing = stdout_text(&status);
+    assert!(
+        listing.contains("Bundles that do not fit in this directory: 1")
+            && listing.contains("(set by ENVOY_CACHE_MAX_PATH)"),
+        "stdout was:\n{listing}"
+    );
+
+    // Without the cap the same bundle is cached.
+    let lifted = run(None);
+    assert!(
+        stderr_text(&lifted).contains("caching gt:tool@1.0.0"),
+        "stderr was:\n{}",
+        stderr_text(&lifted)
+    );
+    assert!(cache_root.join("bundles/gt/tool/1.0.0/.envoy").is_dir());
 }
 
 #[test]

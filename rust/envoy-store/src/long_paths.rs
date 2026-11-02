@@ -94,7 +94,7 @@ fn classify(reading: Reading) -> LongPaths {
     }
 }
 
-fn group_thousands(number: usize) -> String {
+pub(crate) fn group_thousands(number: usize) -> String {
     let digits = number.to_string();
     let mut grouped = String::new();
     for (index, digit) in digits.chars().enumerate() {

@@ -73,6 +73,10 @@ impl Machine {
     }
 
     fn run_script(&self, path: &Path, arguments: &[&str]) -> Output {
+        self.run_script_with(path, arguments, &[])
+    }
+
+    fn run_script_with(&self, path: &Path, arguments: &[&str], env: &[(&str, &str)]) -> Output {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("powershell.exe");
             command.args([
@@ -93,11 +97,17 @@ impl Machine {
             .env("USERPROFILE", &self.home)
             .env_remove("ENVOY_CONFIG_ROOT")
             .env_remove("ENVOY_CONFIG_PROD")
-            .env_remove("ENVOY_REDIRECT_CONFIG");
+            .env_remove("ENVOY_REDIRECT_CONFIG")
+            .env_remove("ENVOY_CACHE_MAX_PATH")
+            .envs(env.iter().copied());
         command.output().expect("the script runs")
     }
 
     fn install_from(&self, source: &Path) -> Output {
+        self.install_from_with(source, &[])
+    }
+
+    fn install_from_with(&self, source: &Path, env: &[(&str, &str)]) -> Output {
         let mut arguments: Vec<OsString> = if cfg!(windows) {
             vec!["-NoPath".into(), "-Source".into()]
         } else {
@@ -108,7 +118,7 @@ impl Machine {
             .iter()
             .map(|argument| argument.to_str().expect("arguments are text"))
             .collect();
-        self.run("install-envoy", &arguments)
+        self.run_script_with(&script("install-envoy"), &arguments, env)
     }
 
     fn uninstall(&self, remove_cache: bool) -> Output {
@@ -175,6 +185,29 @@ fn the_launcher_is_installed_as_envoy_and_en() {
     assert_eq!(
         fs::read_dir(machine.bin()).expect("bin is listed").count(),
         2
+    );
+}
+
+#[test]
+fn the_installer_mentions_a_path_cap_only_while_one_is_set() {
+    let machine = Machine::new();
+
+    let plain = machine.install_from(&machine.release);
+    assert!(plain.status.success(), "{}", text(&plain));
+    assert!(
+        !text(&plain).contains("ENVOY_CACHE_MAX_PATH"),
+        "{}",
+        text(&plain)
+    );
+
+    let capped = machine.install_from_with(&machine.release, &[("ENVOY_CACHE_MAX_PATH", "200")]);
+    assert!(capped.status.success(), "{}", text(&capped));
+    // Only Windows says anything about the limit, so only Windows has a line to correct.
+    assert_eq!(
+        text(&capped).contains("ENVOY_CACHE_MAX_PATH is set to '200'"),
+        cfg!(windows),
+        "{}",
+        text(&capped)
     );
 }
 

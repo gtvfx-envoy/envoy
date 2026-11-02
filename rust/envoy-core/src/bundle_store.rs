@@ -16,8 +16,8 @@ use std::time::{Duration, SystemTime};
 
 pub use envoy_store::settings::{parse_switch, CACHE_ROOT_VAR, CACHE_SETTING, CACHE_VAR};
 pub use envoy_store::{
-    format_bytes, EntryInfo, Health, LongPaths, ProgressPrinter, PrunePolicy, PruneReport, Store,
-    Verdict,
+    format_bytes, EntryInfo, Health, LongPaths, PathCap, ProgressPrinter, PrunePolicy, PruneReport,
+    Store, Verdict,
 };
 use envoy_store::{EntryKey, Lease, Observer, Outcome, StoreError};
 
@@ -417,13 +417,13 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
                     "Not cached, loads from {}: {error}",
                     bundle.root.display()
                 ),
-                StoreError::PathTooLong { .. } => warn(
+                StoreError::PathTooLong { capped, .. } => warn(
                     observer,
                     &bndlid,
                     format!(
                         "Could not cache {key}, so it loads from {}: {error}. {}",
                         bundle.root.display(),
-                        path_too_long_advice(store.long_paths())
+                        path_too_long_advice(store.long_paths(), capped)
                     ),
                 ),
                 _ => warn(
@@ -445,8 +445,11 @@ fn offer(bundle: BundleInfo, store: &Store, observer: &dyn Observer) -> Offered 
 }
 
 /// What to say after a "does not fit" warning so that the person can act on it.
-fn path_too_long_advice(long_paths: LongPaths) -> &'static str {
-    if long_paths.can_be_raised() {
+///
+/// `capped` is whether `ENVOY_CACHE_MAX_PATH` set the limit. It holds the limit
+/// down whatever Windows allows, so turning on long paths would not help.
+fn path_too_long_advice(long_paths: LongPaths, capped: bool) -> &'static str {
+    if long_paths.can_be_raised() && !capped {
         "A shorter cache directory, set with ENVOY_CACHE_ROOT, would fit it, and so would turning \
 on Windows long paths (see 'Long paths on Windows' in the team administration guide)"
     } else {
@@ -1410,13 +1413,46 @@ server:/export /home nfs4 rw 0 0
     #[test]
     fn long_paths_are_only_suggested_where_turning_them_on_would_help() {
         for raisable in [LongPaths::Off, LongPaths::Unknown] {
-            assert!(path_too_long_advice(raisable).contains("Windows long paths"));
+            assert!(path_too_long_advice(raisable, false).contains("Windows long paths"));
+            // A cap holds the limit down whatever Windows allows.
+            let capped = path_too_long_advice(raisable, true);
+            assert!(capped.contains("ENVOY_CACHE_ROOT"), "{capped}");
+            assert!(!capped.contains("long paths"), "{capped}");
         }
         for other in [LongPaths::On, LongPaths::NotWindows] {
-            let advice = path_too_long_advice(other);
-            assert!(advice.contains("ENVOY_CACHE_ROOT"), "{advice}");
-            assert!(!advice.contains("long paths"), "{advice}");
+            for capped in [false, true] {
+                let advice = path_too_long_advice(other, capped);
+                assert!(advice.contains("ENVOY_CACHE_ROOT"), "{advice}");
+                assert!(!advice.contains("long paths"), "{advice}");
+            }
         }
+    }
+
+    #[test]
+    fn a_bundle_the_cap_refuses_names_the_cap_and_does_not_suggest_long_paths() {
+        let temp = tempdir().expect("tempdir is created");
+        let bundles = studio(temp.path());
+        let root = (0..20).fold(temp.path().join("store"), |path, level| {
+            path.join(format!("deep_root_{level}"))
+        });
+        // Long paths are on, so only the cap can refuse a path this deep.
+        let store = Store::open(&root)
+            .expect("store opens")
+            .with_long_paths(LongPaths::On)
+            .with_path_cap(PathCap::Limit(200));
+        let said = Said::default();
+
+        let offered = offer(bundles[0].clone(), &store, &said);
+
+        assert!(matches!(offered.result, Err(Stay::Failed(_))));
+        let said = said.0.into_inner().expect("lock is free");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("the limit is 200 (set by ENVOY_CACHE_MAX_PATH)"),
+            "{said:?}"
+        );
+        assert!(said[0].contains("ENVOY_CACHE_ROOT"), "{said:?}");
+        assert!(!said[0].contains("long paths"), "{said:?}");
     }
 
     /// Counts what fills report.

@@ -9,7 +9,7 @@ use tempfile::{tempdir, TempDir};
 
 use crate::refusal::{self, Refusal};
 use crate::{
-    EntryKey, EntryState, Health, LongPaths, Observer, Outcome, PrunePolicy, Quiet, Store,
+    EntryKey, EntryState, Health, LongPaths, Observer, Outcome, PathCap, PrunePolicy, Quiet, Store,
     StoreError, STORE_FORMAT,
 };
 
@@ -585,14 +585,16 @@ fn a_store_or_entry_from_a_newer_envoy_is_left_alone() {
 }
 
 /// A store whose root is too deep for the source's deepest file to fit under it,
-/// while long paths are off.
+/// while long paths are off. Nothing from the machine's environment may change
+/// the limit, so no cap is set either.
 fn too_deep_for_the_store(temp: &Path) -> (Store, PathBuf) {
     let root = (0..9).fold(temp.join("store"), |path, level| {
         path.join(format!("deep_root_{level}"))
     });
     let store = Store::open(&root)
         .expect("store opens")
-        .with_long_paths(LongPaths::Off);
+        .with_long_paths(LongPaths::Off)
+        .with_path_cap(PathCap::Unset);
     let source = temp.join("source");
     let deep = (0..12).fold(source.clone(), |path, level| {
         path.join(format!("nested_{level:05}"))
@@ -662,7 +664,8 @@ fn the_path_limit_is_measured_at_the_final_location() {
     let temp = tempdir().expect("tempdir is created");
     let store = Store::open(temp.path().join("store"))
         .expect("store opens")
-        .with_long_paths(LongPaths::Off);
+        .with_long_paths(LongPaths::Off)
+        .with_path_cap(PathCap::Unset);
     let fits = EntryKey::new("a", "b", "1").expect("key is valid");
     let over = EntryKey::new("a", "b", "2").expect("key is valid");
     let longest = 250 - (store.entry_path(&fits).as_os_str().len() + 1);
@@ -752,6 +755,206 @@ fn a_store_keeps_to_the_machines_setting_unless_told_otherwise() {
         store.with_long_paths(LongPaths::Off).long_paths(),
         LongPaths::Off
     );
+}
+
+#[test]
+fn a_store_reads_the_cap_from_the_environment_unless_told_otherwise() {
+    let temp = tempdir().expect("tempdir is created");
+    let store = Store::open(temp.path().join("store")).expect("store opens");
+    assert_eq!(store.path_cap(), &PathCap::from_environment());
+
+    assert_eq!(
+        store.with_path_cap(PathCap::Limit(120)).path_cap(),
+        &PathCap::Limit(120)
+    );
+}
+
+#[test]
+fn a_cap_lowers_the_limit_below_what_long_paths_allow() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let on = off.with_long_paths(LongPaths::On);
+    let key = key("1.0.0");
+
+    let error = on
+        .clone()
+        .with_path_cap(PathCap::Limit(250))
+        .ensure(&key, &source, &Quiet)
+        .expect_err("a deep bundle does not fit under the cap");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                capped: true,
+                remembered: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .ends_with("the limit is 250 (set by ENVOY_CACHE_MAX_PATH)"),
+        "{error}"
+    );
+    assert!(on.lookup(&key).is_none());
+
+    let roomy = on
+        .with_path_cap(PathCap::Limit(5_000))
+        .ensure(&key, &source, &Quiet)
+        .expect("a cap above the bundle's depth refuses nothing");
+    assert!(matches!(roomy.outcome, Outcome::Filled { .. }));
+}
+
+#[test]
+fn raising_or_removing_the_cap_lets_a_refused_bundle_in() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let capped = off
+        .with_long_paths(LongPaths::On)
+        .with_path_cap(PathCap::Limit(250));
+    let key = key("1.0.0");
+    capped
+        .ensure(&key, &source, &Quiet)
+        .expect_err("it does not fit under the cap");
+    let record = capped.refusal_path(&key);
+    assert!(record.exists(), "the refusal is remembered");
+
+    // A cap that still refuses it keeps the record.
+    let still = capped.clone().with_path_cap(PathCap::Limit(260));
+    assert!(still.refusal(&key).is_some());
+
+    let removed = capped.with_path_cap(PathCap::Unset);
+    assert!(removed.refusal(&key).is_none());
+    let ensured = removed
+        .ensure(&key, &source, &Quiet)
+        .expect("it is cached once the cap is gone");
+
+    assert!(matches!(ensured.outcome, Outcome::Filled { .. }));
+    assert!(!record.exists(), "the refusal is forgotten");
+}
+
+#[test]
+fn an_entry_cached_before_the_cap_is_set_aside_by_it() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let uncapped = off.with_long_paths(LongPaths::On);
+    let capped = uncapped.clone().with_path_cap(PathCap::Limit(250));
+    let key = key("1.0.0");
+    uncapped
+        .ensure(&key, &source, &Quiet)
+        .expect("it is cached while no cap applies");
+    assert!(
+        capped.refusal(&key).is_some(),
+        "diagnose can tell before any run has"
+    );
+
+    let error = capped
+        .ensure(&key, &source, &Quiet)
+        .expect_err("it no longer fits");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                capped: true,
+                remembered: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    let again = capped
+        .ensure(&key, &source, &Quiet)
+        .expect_err("it still does not fit");
+    assert!(
+        matches!(
+            again,
+            StoreError::PathTooLong {
+                remembered: true,
+                ..
+            }
+        ),
+        "the second run says nothing new: {again}"
+    );
+    assert_eq!(capped.refusals().len(), 1, "cache status lists it");
+    assert!(capped.lookup(&key).is_some(), "the files stay for prune");
+
+    let ensured = uncapped
+        .ensure(&key, &source, &Quiet)
+        .expect("it fits again once the cap is removed");
+    assert!(matches!(ensured.outcome, Outcome::Hit));
+}
+
+#[test]
+fn a_cap_applies_where_the_machine_has_no_limit() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let store = off
+        .with_long_paths(LongPaths::NotWindows)
+        .with_path_cap(PathCap::Limit(250));
+
+    let error = store
+        .ensure(&key("1.0.0"), &source, &Quiet)
+        .expect_err("the cap holds on every system");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                capped: true,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_cap_cannot_raise_the_machines_limit() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let store = off.with_path_cap(PathCap::Limit(5_000));
+
+    let error = store
+        .ensure(&key("1.0.0"), &source, &Quiet)
+        .expect_err("the machine's limit still applies");
+
+    assert!(
+        matches!(
+            error,
+            StoreError::PathTooLong {
+                limit: 250,
+                capped: false,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains("ENVOY_CACHE_MAX_PATH"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_cap_that_cannot_be_used_changes_nothing() {
+    let temp = tempdir().expect("tempdir is created");
+    let (off, source) = too_deep_for_the_store(temp.path());
+    let store = off
+        .with_long_paths(LongPaths::On)
+        .with_path_cap(PathCap::parse(Some("two hundred")));
+
+    let ensured = store
+        .ensure(&key("1.0.0"), &source, &Quiet)
+        .expect("only the machine's limit applies");
+
+    assert!(matches!(ensured.outcome, Outcome::Filled { .. }));
 }
 
 #[test]

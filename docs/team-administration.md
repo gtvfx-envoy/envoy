@@ -159,10 +159,28 @@ What the setting does not do:
 - **A program must opt in.** Windows lets a program use long paths only if the program declares, in its manifest, that it can. Python 3.6 and newer does, but a program that embeds Python, such as an application that hosts a pipeline, follows its own manifest. A program that does not opt in still fails on a path past 260 characters, and envoy cannot know which programs a bundle starts. If one of your tools fails on a deep path, that tool is the limit: publish the bundle with shorter paths. Running from the share does not avoid it, because a path on the share counts towards the limit as well.
 - **It does not change a machine you cannot change.** Those keep the 250-character limit. A shorter cache directory (`ENVOY_CACHE_ROOT`) or shorter paths in the bundle still work there.
 
-The limit is checked again whenever it changes, in both directions:
+The limit is checked again whenever it changes, in both directions, whether Windows long paths or [`ENVOY_CACHE_MAX_PATH`](#keeping-a-lower-limit) changed it:
 
-- A bundle that was refused is cached on its next use once long paths are on.
-- A bundle that was cached while they were on, and does not fit now that they are off (or on a machine that does not have them, for a cache that roams), is set aside: it runs from the share, says so once, and shows as `refused` in `en --diagnose` and in `en cache status`. Its copy stays in the cache and is removed by the usual cleanup once nothing has used it for the idle period.
+- A bundle that was refused is cached on its next use once the limit allows it.
+- A bundle that was cached under a higher limit, and does not fit now (long paths turned off, a lower `ENVOY_CACHE_MAX_PATH`, or a cache that roams to a machine without long paths), is set aside: it runs from the share, says so once, and shows as `refused` in `en --diagnose` and in `en cache status`. Its copy stays in the cache and is removed by the usual cleanup once nothing has used it for the idle period.
+
+### Keeping a lower limit
+
+Turning on long paths lets envoy cache bundles that a program without long-path support then cannot open. If some of your tools are like that, keep the cache to a lower limit than Windows allows, without changing the Windows setting: set the environment variable `ENVOY_CACHE_MAX_PATH` to a number of characters.
+
+```powershell
+[Environment]::SetEnvironmentVariable('ENVOY_CACHE_MAX_PATH', '250', 'Machine')
+```
+
+Envoy uses the lower of this and what Windows allows, so the variable can only lower the limit: it cannot raise it past what Windows allows, and with long paths off a value above 250 changes nothing. It applies to everything the cache holds, including the launcher's copies of envoy itself (one that does not fit runs from the share, and says so each time it starts), and it works the same on Linux and macOS, which have no limit of their own. Programs read environment variables when they start, so open a new terminal after setting it. An empty value means it is not set, and a value that is not a whole number above zero is ignored; the reports below say so.
+
+While it is set, `en cache status` prints a `Path limit:` line, and `en --diagnose` a `path limit:` line in its cache section. Nothing is printed while it is not set, because the `Long paths:` line already says what the limit is.
+
+```text
+Path limit: 250 characters, set by ENVOY_CACHE_MAX_PATH (without it the limit would be 32,000)
+```
+
+A bundle that does not fit under the cap is handled like one that does not fit under Windows' own limit, and its warning says that `ENVOY_CACHE_MAX_PATH` set the limit. Raising or removing the variable lets it in on its next use. Nested `en` commands that a bundle starts inherit the variable.
 
 ## Who can change what
 

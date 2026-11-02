@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use envoy_core::bundle_store::{
     cache_for_command, existing_store, format_bytes, on_network, parse_switch, standing, summarize,
-    CacheSettings, LongPaths, Standing,
+    CacheSettings, LongPaths, PathCap, Standing,
 };
 use envoy_core::commands::{find_commands_file, CommandDefinition, CommandRegistry};
 use envoy_core::discovery::{get_bundles, BundleInfo};
@@ -953,6 +953,9 @@ and file locks may be unreliable; point ENVOY_CACHE_ROOT at a local disk"
         }
         if let Some(report) = LongPaths::detect().describe() {
             println!("  long paths: {report}");
+        }
+        if let Some(report) = PathCap::from_environment().describe(LongPaths::detect()) {
+            println!("  path limit: {report}");
         }
         match summarize(cache) {
             Some(summary) => {

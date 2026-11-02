@@ -271,6 +271,11 @@ function Write-LongPathsNote {
             Write-Host 'Windows long paths: off (paths in the cache are limited to 250 characters). A bundle with deeper folders then runs from the share. An administrator can turn long paths on: see "Long paths on Windows" in the team administration guide.'
         }
     }
+
+    # A cap in the environment can lower the limit below what is said above.
+    if ($env:ENVOY_CACHE_MAX_PATH) {
+        Write-Host "ENVOY_CACHE_MAX_PATH is set to '$($env:ENVOY_CACHE_MAX_PATH)', which can lower that limit. 'envoy cache status' shows the limit envoy uses."
+    }
 }
 
 function Install-Launcher {

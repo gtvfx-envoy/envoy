@@ -122,7 +122,8 @@ bundle cache location and state (and, beside each bundle, whether it is
 cached, not cached yet, refused because its paths are too long for the cache
 directory, or never cached) and, on Windows, whether
 [long paths](../team-administration.md#long-paths-on-windows) are on (one line
-in the cache section, not one per bundle), detected VCS backend (Git,
+in the cache section, not one per bundle), the [path limit](../team-administration.md#keeping-a-lower-limit)
+while `ENVOY_CACHE_MAX_PATH` is set, detected VCS backend (Git,
 Perforce, or [Lore](https://github.com/EpicGames/lore)) with its pending
 change count, telemetry status, and bundle-root reachability (flagging
 network/UNC paths). Pass a command name to also see its full resolved
@@ -229,7 +230,7 @@ Published bundles are copied to a local [cache](../caching.md) the first time a 
 
 | Command | What it does |
 |---|---|
-| `envoy cache status` | Where the cache is, whether caching is on and what decided that, on Windows whether [long paths](../team-administration.md#long-paths-on-windows) are on, how many entries and how much space, bundles that do not fit, and when it was last pruned |
+| `envoy cache status` | Where the cache is, whether caching is on and what decided that, on Windows whether [long paths](../team-administration.md#long-paths-on-windows) are on, the [path limit](../team-administration.md#keeping-a-lower-limit) while `ENVOY_CACHE_MAX_PATH` is set, how many entries and how much space, bundles that do not fit, and when it was last pruned |
 | `envoy cache list` | Every entry with its size and when it was last used |
 | `envoy cache verify` | Check each entry against what was recorded when it was copied: nothing missing, nothing extra, sizes add up. Exits `1` when an entry is damaged. It does not read file contents |
 | `envoy cache prune [--dry-run]` | Remove entries unused for the idle period (`ENVOY_CACHE_MAX_IDLE_DAYS`, default 30 days), and the least recently used beyond `ENVOY_CACHE_MAX_SIZE` if set. Never removes an entry a running envoy is using |
@@ -370,6 +371,7 @@ en -o gt:does-not-exist=R:/dev/maya --list
 | `ENVOY_CACHE_ROOT` | Directory holding the bundle cache (default `~/.envoy/cache`) |
 | `ENVOY_CACHE_MAX_IDLE_DAYS` | Days a cached bundle may go unused before it is removed (default `30`) |
 | `ENVOY_CACHE_MAX_SIZE` | Size the cache may grow to, such as `500GB`; the least recently used bundles are removed beyond it (default: no limit) |
+| `ENVOY_CACHE_MAX_PATH` | The most characters a path in the cache may have: a way to keep the limit below what Windows allows (see [Keeping a lower limit](../team-administration.md#keeping-a-lower-limit)). It never raises the limit. Default: unset, so the machine's limit applies |
 | `ENVOY_CACHE_THREADS` | Files copied into the cache at once, from 1 to 64, shared by every bundle being copied (default `16`; see [Bundle Caching](../caching.md#settings)) |
 | `ENVOY_BUNDLE_CACHE` | Older name for `ENVOY_CACHE_ROOT`; `ENVOY_CACHE_ROOT` takes precedence |
 | `ENVOY_DISABLE_BUNDLE_CACHE` | Older way to turn caching off (`1`/`true`/`yes`); `ENVOY_CACHE` takes precedence |

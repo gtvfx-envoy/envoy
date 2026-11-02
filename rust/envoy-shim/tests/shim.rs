@@ -405,6 +405,36 @@ fn with_caching_off_envoy_runs_from_the_share() {
 }
 
 #[test]
+fn an_app_the_path_cap_refuses_runs_from_the_share_and_says_so_at_each_start() {
+    let studio = Studio::new(&["v1"]);
+    let run = || {
+        studio
+            .shim("bob")
+            .env("ENVOY_CACHE_MAX_PATH", "30")
+            .output()
+            .expect("the shim runs")
+    };
+
+    let first = run();
+    let second = run();
+
+    for output in [&first, &second] {
+        assert!(
+            in_directory(&started_from(output), &studio.share),
+            "stdout was:\n{}",
+            stdout(output)
+        );
+        let said = stderr(output);
+        assert!(
+            said.contains("could not cache envoy v1")
+                && said.contains("(set by ENVOY_CACHE_MAX_PATH)"),
+            "stderr was:\n{said}"
+        );
+    }
+    assert!(!studio.cache.join("bundles/app/envoy/v1").exists());
+}
+
+#[test]
 fn without_a_redirect_file_the_shim_says_what_to_set() {
     let studio = Studio::new(&["v1"]);
 

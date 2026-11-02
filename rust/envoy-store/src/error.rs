@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::settings::CACHE_MAX_PATH_VAR;
+
 /// Errors raised by the store.
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -41,15 +43,19 @@ pub enum StoreError {
     ///
     /// The refusal is remembered, so the source is not walked again until the
     /// store moves or the limit changes, for example when Windows long paths
-    /// are turned on.
+    /// are turned on or `ENVOY_CACHE_MAX_PATH` is raised.
     #[error(
         "{key} contains paths that would reach {needed} characters under {root}; \
-the limit is {limit}"
+the limit is {limit}{}",
+        set_by_the_cap(.capped)
     )]
     PathTooLong {
         key: String,
         needed: usize,
         limit: usize,
+        /// `true` when `ENVOY_CACHE_MAX_PATH` set the limit, so turning on
+        /// Windows long paths would not raise it.
+        capped: bool,
         root: PathBuf,
         /// `true` when an earlier run already found this and was reported.
         remembered: bool,
@@ -79,6 +85,15 @@ the limit is {limit}"
 
 /// Result alias for store operations.
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// What a "does not fit" message says when `ENVOY_CACHE_MAX_PATH` set the limit.
+fn set_by_the_cap(capped: &bool) -> String {
+    if *capped {
+        format!(" (set by {CACHE_MAX_PATH_VAR})")
+    } else {
+        String::new()
+    }
+}
 
 /// Build a `map_err` closure that attaches `path` to an I/O error.
 pub(crate) fn io_error(path: impl Into<PathBuf>) -> impl FnOnce(io::Error) -> StoreError {

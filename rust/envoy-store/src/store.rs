@@ -15,6 +15,7 @@ use crate::key::EntryKey;
 use crate::lock::{Lease, LockFile};
 use crate::long_paths::LongPaths;
 use crate::observer::Observer;
+use crate::path_cap::PathCap;
 use crate::refusal::{self, Refusal, REFUSED_DIR};
 use crate::state::{
     self, is_kept, is_usable, last_used, read_state, touch_file, touch_last_used, unix_seconds,
@@ -187,6 +188,8 @@ pub struct Store {
     root: PathBuf,
     /// What the machine allows for the length of a path, which the guard follows.
     long_paths: LongPaths,
+    /// A lower limit a person asked for, which the guard follows as well.
+    path_cap: PathCap,
     /// Shared by clones, so every thread using this store is coordinated.
     coordinator: Arc<Coordinator>,
 }
@@ -224,6 +227,7 @@ impl Store {
         Ok(Self {
             root,
             long_paths: LongPaths::detect(),
+            path_cap: PathCap::from_environment(),
             coordinator: Arc::default(),
         })
     }
@@ -241,6 +245,21 @@ impl Store {
     /// Return what the store allows for the length of a path.
     pub fn long_paths(&self) -> LongPaths {
         self.long_paths
+    }
+
+    /// Keep to `cap` instead of what `ENVOY_CACHE_MAX_PATH` says.
+    ///
+    /// Like [`Store::with_long_paths`], this is for a caller that knows better
+    /// and for tests.
+    pub fn with_path_cap(mut self, cap: PathCap) -> Self {
+        self.path_cap = cap;
+        self
+    }
+
+    /// Return the lower limit on the length of a path that was asked for, which
+    /// applies besides what the machine allows.
+    pub fn path_cap(&self) -> &PathCap {
+        &self.path_cap
     }
 
     /// Open the store at `root` only if it already exists.
@@ -512,16 +531,17 @@ impl Store {
     /// store, and the standard library gives it the long-path prefix, so it may
     /// be longer.
     fn check_path_budget(&self, key: &EntryKey, longest: usize, remembered: bool) -> Result<()> {
-        let Some(limit) = self.long_paths.limit() else {
+        let Some(limit) = self.path_cap.apply(self.long_paths) else {
             return Ok(());
         };
 
         let needed = self.entry_path(key).as_os_str().len() + 1 + longest;
-        if needed > limit {
+        if needed > limit.characters {
             return Err(StoreError::PathTooLong {
                 key: key.to_string(),
                 needed,
-                limit,
+                limit: limit.characters,
+                capped: limit.capped,
                 root: self.root.clone(),
                 remembered,
             });
