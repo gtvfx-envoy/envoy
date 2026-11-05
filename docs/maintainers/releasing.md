@@ -350,9 +350,11 @@ Publishing the release automatically closes its matching Envoy-impact issue.
 ### 5. Prepare and publish Despatch when needed
 
 Run **Prepare Release** in `despatch` with its new version and the Envoy version
-to embed. The pull request synchronizes `pyproject.toml`,
-`py/despatch/__init__.py`, and both Envoy defaults in the executable release
-workflow.
+to embed. The pull request changes only `pyproject.toml` (the package version
+and the Envoy pin, `[tool.despatch] envoy-version`) and
+`py/despatch/__init__.py`. It must never contain a change under
+`.github/workflows/`: the release App cannot push workflow files (see
+[Release Troubleshooting](release-troubleshooting.md#prepare-release-and-tag-release)).
 
 After review and merge, run **Tag Release** with the Despatch version. Its
 existing tag build downloads exactly one compatible Windows ABI3 Envoy wheel,
