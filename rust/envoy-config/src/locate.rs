@@ -36,21 +36,28 @@ pub fn redirect_candidates(env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf>
     let root = PathBuf::from(root);
 
     let mut places = Vec::new();
-    if let Some(team) = set(TEAM_VAR).filter(|team| is_safe_name(team)) {
+    if let Some(team) = set(TEAM_VAR).filter(|team| is_safe_team(team)) {
         places.push(root.join(team).join(REDIRECT_FILE_NAME));
     }
     places.push(root.join(REDIRECT_FILE_NAME));
     places
 }
 
-/// A team name becomes a directory name, so it must not be able to leave the
-/// config root.
-fn is_safe_name(name: &str) -> bool {
+/// Whether `name` may name a team.
+///
+/// A team name becomes a directory name under the config root, so it must not be
+/// able to leave it: letters, digits, `.`, `_` and `-` only, and no trailing dot
+/// (which also rules out `.` and `..`). Windows drops a trailing dot from a
+/// directory name, so a name that ends in one would name another team's folder.
+///
+/// The launcher reads the team's file by this rule and the tools that publish it
+/// write by the same one.
+pub fn is_safe_team(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !name.chars().all(|c| c == '.')
+        && !name.ends_with('.')
 }
 
 #[cfg(test)]
@@ -108,7 +115,7 @@ mod tests {
 
     #[test]
     fn a_team_name_cannot_leave_the_config_root() {
-        for team in ["..", "../other", "a/b", "a\\b", ""] {
+        for team in ["..", "../other", "a/b", "a\\b", "", "rigging."] {
             let lookup = env(&[("ENVOY_CONFIG_PROD", "/cfg"), ("ENVOY_TEAM", team)]);
 
             assert_eq!(
@@ -116,6 +123,28 @@ mod tests {
                 [PathBuf::from("/cfg/redirect.yaml")],
                 "{team:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_team_name_is_letters_digits_and_a_few_marks() {
+        for team in ["rigging", "tech_art", "fx-2", "v1.2", ".hidden", "A"] {
+            assert!(is_safe_team(team), "{team:?}");
+        }
+        for team in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "a b",
+            "a:b",
+            "rig.",
+            "rig..",
+            "rigg\u{e9}",
+            "a\0b",
+        ] {
+            assert!(!is_safe_team(team), "{team:?}");
         }
     }
 

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
+use envoy_config::layout::{self, POINTER_FILE, POINTER_SCHEMA, VERSION_REPORT_PREFIX};
 use envoy_config::locate::CONFIG_ROOT_VAR;
 use envoy_config::redirect::is_safe_version;
 use envoy_store::settings::{self, parse_switch};
@@ -40,11 +41,6 @@ const INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Records when the share was last looked at, in `<config root>/shim`.
 const STAMP: &str = "last-check";
-
-const POINTER: &str = "current.json";
-
-/// The newest pointer layout this launcher understands.
-const SCHEMA: u32 = 1;
 
 /// How long copying the new launcher, or trying it out, may take before giving up.
 const WORK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -213,14 +209,14 @@ pub fn status(env: &dyn Fn(&str) -> Option<String>) -> String {
 /// Compare with the pointer on the share, and replace the installed launcher
 /// when the pointer names another version.
 pub fn update(share: &Path, dir: &Path) -> Result<Outcome, String> {
-    let folder = share.join("shim");
-    let pointer_path = folder.join(POINTER);
+    let folder = share.join(layout::SHIM_DIR);
+    let pointer_path = folder.join(POINTER_FILE);
     let text = read_with_timeout(&pointer_path, DEFAULT_TIMEOUT)
         .map_err(|error| format!("cannot read {}: {error}", pointer_path.display()))?;
     let pointer: Pointer = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|error| format!("{} is not valid: {error}", pointer_path.display()))?;
 
-    if pointer.schema.is_some_and(|schema| schema > SCHEMA) {
+    if pointer.schema.is_some_and(|schema| schema > POINTER_SCHEMA) {
         return Err(format!(
             "{} was written for a newer launcher; run the installer again to get it",
             pointer_path.display()
@@ -240,7 +236,7 @@ pub fn update(share: &Path, dir: &Path) -> Result<Outcome, String> {
     let published = folder
         .join(&pointer.version)
         .join(TARGET)
-        .join(exe_name("envoy"));
+        .join(layout::launcher_file(cfg!(windows)));
     let staging = dir.join(STAGING);
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir(&staging)
@@ -278,7 +274,7 @@ fn stage(published: &Path, version: &str, staging: &Path) -> Result<PathBuf, Str
     .map_err(|error| format!("the published launcher does not run: {error}"))?;
 
     let said = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let reported = said.strip_prefix("envoy-shim ").unwrap_or(&said);
+    let reported = said.strip_prefix(VERSION_REPORT_PREFIX).unwrap_or(&said);
     if !output.status.success() || !same_version(reported, version) {
         return Err(format!(
             "the launcher published as {version} reports '{said}', so it was not installed"
@@ -450,8 +446,20 @@ mod tests {
     fn share_with_pointer(contents: &str) -> tempfile::TempDir {
         let share = tempdir().expect("tempdir is created");
         fs::create_dir_all(share.path().join("shim")).expect("shim folder is created");
-        fs::write(share.path().join("shim").join(POINTER), contents).expect("pointer is written");
+        fs::write(share.path().join("shim").join("current.json"), contents)
+            .expect("pointer is written");
         share
+    }
+
+    #[test]
+    fn a_published_platform_is_labelled_as_the_share_names_it() {
+        // Only the musl build of Linux is published; a glibc build is for developers.
+        if cfg!(all(target_os = "linux", not(target_env = "musl"))) {
+            return;
+        }
+        if let Some(host) = layout::Target::host() {
+            assert_eq!(TARGET, host.label());
+        }
     }
 
     #[test]

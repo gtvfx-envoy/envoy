@@ -31,8 +31,12 @@ DIRECT_UTILS_APIS = (
     "envoy_core::discovery::{discover_bundles_auto, Bundle}",
     "envoy_core::stack::Stack",
     "envoy_core::stack_registry::STACK_ROOTS_VAR",
-    "envoy_core::config::redirect::{Redirect, Problem, Severity}",
+    "envoy_core::config::ConfigError",
+    "envoy_core::config::redirect::{Redirect, Problem, Severity, normalize_user, is_safe_version}",
     "envoy_core::config::expand::expand_source",
+    "envoy_core::config::locate::{CONFIG_ROOT_VAR, REDIRECT_FILE_NAME, is_safe_team}",
+    "envoy_core::config::layout::{Target, INSTALLERS, SHIM_DIR, POINTER_FILE, POINTER_SCHEMA, "
+    "ARCHIVE_PREFIX, VERSION_REPORT_PREFIX, app_executable, launcher_file}",
 )
 
 

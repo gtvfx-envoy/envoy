@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 import tarfile
 import zipfile
@@ -116,3 +117,25 @@ def testPackagingNeedsTheBuiltLauncher(tmp_path, monkeypatch, capsys):
     """A missing build is an error that names the file, not an empty archive."""
     with pytest.raises(FileNotFoundError, match="envoy-shim"):
         runPackaging(tmp_path, monkeypatch, capsys, build=False)
+
+
+def testTheWorkflowPackagesForTheSamePlatformsTheShareLayoutNames():
+    """The release workflow and ``envoy-config``'s layout name the same platforms.
+
+    ``engit publish shim`` finds a platform's archive by the name the layout gives it, so a
+    platform packaged under another label would never be published.
+    """
+    layout = (REPO_ROOT / "rust" / "envoy-config" / "src" / "layout.rs").read_text(encoding="utf-8")
+    label_function = re.search(r"pub fn label\(self\).*?\n    \}", layout, re.DOTALL)
+    assert label_function is not None
+    layout_labels = set(re.findall(r'=> "([a-z0-9_-]+)"', label_function.group(0)))
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "build-release.yml").read_text(
+        encoding="utf-8"
+    )
+    workflow_labels = set(re.findall(r"--target-name ([a-z0-9_-]+)", workflow)) | set(
+        re.findall(r"target_name: ([a-z0-9_-]+)", workflow)
+    )
+
+    assert len(layout_labels) == 4
+    assert layout_labels == workflow_labels

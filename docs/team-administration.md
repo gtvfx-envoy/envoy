@@ -124,7 +124,7 @@ From then on, installed launchers notice the new `current.json` within a day and
 
 ## Teams
 
-A team that needs its own pins sets `ENVOY_TEAM=<team>` on its machines. The launcher then looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first and uses the studio-wide `redirect.yaml` only when the team has no file at all. A team file that is there but cannot be used (invalid, unreadable, or too new for the launcher) is never replaced by the studio-wide one: the team keeps its own last good copy, so a typo in the team's file cannot quietly move the team to the studio's version. The launcher pointer in `shim/` is shared by everyone.
+A team that needs its own pins sets `ENVOY_TEAM=<team>` on its machines. A team name becomes a folder name, so it is letters, digits, `.`, `_` and `-`, and does not end with a dot; the launcher ignores any other name and uses the studio-wide file. The launcher looks for `<ENVOY_CONFIG_PROD>/<team>/redirect.yaml` first and uses the studio-wide `redirect.yaml` only when the team has no file at all. A team file that is there but cannot be used (invalid, unreadable, or too new for the launcher) is never replaced by the studio-wide one: the team keeps its own last good copy, so a typo in the team's file cannot quietly move the team to the studio's version. The launcher pointer in `shim/` is shared by everyone.
 
 ## Emergencies
 
