@@ -46,7 +46,7 @@ pub fn redirect_candidates(env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf>
 /// Whether `name` may name a team.
 ///
 /// A team name becomes a directory name under the config root, so it must not be
-/// able to leave it: letters, digits, `.`, `_` and `-` only, and no trailing dot
+/// able to leave it: ASCII letters and digits, `.`, `_` and `-` only, and no trailing dot
 /// (which also rules out `.` and `..`). Windows drops a trailing dot from a
 /// directory name, so a name that ends in one would name another team's folder.
 ///

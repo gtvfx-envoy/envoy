@@ -15,7 +15,7 @@
 use std::ffi::OsString;
 use std::fs;
 
-use envoy_config::layout::VERSION_REPORT_PREFIX;
+use envoy_config::layout::{VERSION_FLAG, VERSION_REPORT_PREFIX};
 use envoy_config::redirect::{is_safe_version, Redirect, Severity};
 use envoy_store::settings;
 use envoy_store::{format_bytes, ProgressPrinter};
@@ -41,7 +41,7 @@ envoy shim options (only as the first argument; everything else goes to envoy):
 /// Run the shim option `flag` with the arguments that follow it.
 pub fn run(flag: &str, rest: &[OsString], env: &dyn Fn(&str) -> Option<String>) -> i32 {
     match flag {
-        "--envoy-shim-version" => {
+        VERSION_FLAG => {
             println!("{VERSION_REPORT_PREFIX}{VERSION}");
             0
         }

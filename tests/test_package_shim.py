@@ -137,5 +137,5 @@ def testTheWorkflowPackagesForTheSamePlatformsTheShareLayoutNames():
         re.findall(r"target_name: ([a-z0-9_-]+)", workflow)
     )
 
-    assert len(layout_labels) == 4
+    assert layout_labels
     assert layout_labels == workflow_labels

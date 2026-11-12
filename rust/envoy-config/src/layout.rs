@@ -32,6 +32,10 @@ pub const ARCHIVE_PREFIX: &str = "envoy-shim-";
 /// What `--envoy-shim-version` prints before the version.
 pub const VERSION_REPORT_PREFIX: &str = "envoy-shim ";
 
+/// The option that makes a launcher print its version, as
+/// [`VERSION_REPORT_PREFIX`] followed by the version.
+pub const VERSION_FLAG: &str = "--envoy-shim-version";
+
 /// The installers that go up to the shim folder, those for Windows first.
 pub const INSTALLERS: [&str; 4] = [
     "install-envoy.ps1",
@@ -141,7 +145,9 @@ impl Target {
     /// archive is named for. `None` for any other file name, such as an app's
     /// archive, or for an archive whose extension is not its platform's.
     ///
-    /// The version is not checked.
+    /// The version comes back as written and is not validated: `dev`, `..`, `a/b` and
+    /// `v0.8.0+g1234` are all returned. A caller that uses it, for a folder name or to
+    /// compare it with a release version, checks it first.
     pub fn split_archive_name(name: &str) -> Option<(Self, &str)> {
         let rest = name.strip_prefix(ARCHIVE_PREFIX)?;
         Self::ALL.into_iter().find_map(|target| {

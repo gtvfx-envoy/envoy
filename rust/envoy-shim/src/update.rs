@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use envoy_config::layout::{self, POINTER_FILE, POINTER_SCHEMA, VERSION_REPORT_PREFIX};
+use envoy_config::layout::{
+    self, POINTER_FILE, POINTER_SCHEMA, VERSION_FLAG, VERSION_REPORT_PREFIX,
+};
 use envoy_config::locate::CONFIG_ROOT_VAR;
 use envoy_config::redirect::is_safe_version;
 use envoy_store::settings::{self, parse_switch};
@@ -266,7 +268,7 @@ fn stage(published: &Path, version: &str, staging: &Path) -> Result<PathBuf, Str
     let trial = staged.clone();
     let output = within(WORK_TIMEOUT, move || {
         Command::new(&trial)
-            .arg("--envoy-shim-version")
+            .arg(VERSION_FLAG)
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .output()

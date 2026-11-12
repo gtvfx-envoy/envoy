@@ -147,10 +147,6 @@ def testEveryWorkspaceMemberIsCheckedForTheReleaseVersion():
 
 
 RUST_ROOT = Path(__file__).parents[1] / "rust"
-PUBLIC_ITEM = (
-    r"pub\s+(?:(?:const|unsafe|async)\s+)*"
-    r"(?:const|fn|struct|enum|static|type|trait)\s+{name}\b"
-)
 
 
 def splitApi(entry: str) -> tuple[list[str], list[str]]:
@@ -162,38 +158,23 @@ def splitApi(entry: str) -> tuple[list[str], list[str]]:
     return module, [name]
 
 
-def moduleSource(module: list[str]) -> Path:
-    """Find the source file behind a module path such as ``[envoy_core, config, layout]``."""
-    crate, segments = "envoy-core", module[1:]
-    if segments[:1] == ["config"]:
-        crate, segments = "envoy-config", segments[1:]
-    source = RUST_ROOT / crate / "src"
-    if not segments:
-        return source / "lib.rs"
-    flat = source.joinpath(*segments[:-1], segments[-1] + ".rs")
-    return flat if flat.exists() else source.joinpath(*segments, "mod.rs")
+def testEveryDirectUtilsApiIsNamedWhereItIsCompiledFromOutside():
+    """Each item Envoy Utils is told it may call is named, by its full path, in the contract test.
 
-
-def testEveryDirectUtilsApiIsStillPublic():
-    """The items Envoy Utils is told it may call exist, and every module on the way is public."""
-    core_lib = (RUST_ROOT / "envoy-core" / "src" / "lib.rs").read_text(encoding="utf-8")
-    assert "pub use envoy_config as config;" in core_lib
+    The compiler is what proves an item is public from outside the crate; this keeps the list and
+    that test from drifting apart. A name that appears only in a comment does not count.
+    """
+    contract = RUST_ROOT / "envoy-core" / "tests" / "external_contract.rs"
+    code = re.sub(r"//.*", "", contract.read_text(encoding="utf-8"))
 
     for entry in release_automation.DIRECT_UTILS_APIS:
         module, names = splitApi(entry)
         assert module[0] == "envoy_core", entry
-        for depth in range(1, len(module)):
-            name = re.escape(module[depth])
-            parent = moduleSource(module[:depth]).read_text(encoding="utf-8")
-            assert re.search(rf"pub\s+(?:mod\s+{name}\b|use\s+[^;]*\bas\s+{name}\s*;)", parent), (
-                f"{entry}: module {module[depth]} is not public"
-            )
-        text = moduleSource(module).read_text(encoding="utf-8")
         for name in names:
-            escaped = re.escape(name)
-            defined = re.search(PUBLIC_ITEM.format(name=escaped), text)
-            reexported = re.search(rf"pub\s+use\s+[^;]*\b{escaped}\b[^;]*;", text)
-            assert defined or reexported, f"{entry}: {name} is not public"
+            path = "::".join([*module, name])
+            assert re.search(rf"{re.escape(path)}\b", code), (
+                f"{path} is not named in {contract.name}"
+            )
 
 
 @pytest.mark.parametrize(
