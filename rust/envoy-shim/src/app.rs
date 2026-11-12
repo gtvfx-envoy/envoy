@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use envoy_config::expand::expand_source;
+use envoy_config::layout;
 use envoy_store::settings::Location;
 use envoy_store::{EntryKey, Lease, Observer, Outcome, PathCap, Store};
 
@@ -16,7 +17,9 @@ const APP_NAME: &str = "envoy";
 
 /// Where the app's executable is, relative to the app's directory.
 pub fn exe_relative() -> PathBuf {
-    Path::new("bin").join(if cfg!(windows) { "envoy.exe" } else { "envoy" })
+    Path::new(layout::app_executable(cfg!(windows)))
+        .components()
+        .collect()
 }
 
 /// The store entry that holds `version` of the app.

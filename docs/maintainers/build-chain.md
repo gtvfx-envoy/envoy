@@ -268,6 +268,18 @@ unpacks it into `shim/<version>/<target>/` on the team share, as described in
 [Team Administration](../team-administration.md). `scripts/package_shim.py`
 builds it from the `envoy-shim` binary that the same native build produces.
 
+The names in that layout (the `shim/` folder, `current.json`, the platform
+labels in the archive names, and the installer scripts) are defined in
+`rust/envoy-config/src/layout.rs`, and the launcher uses them from there.
+`engit publish shim` keeps its own copies until it moves to a release that has
+that module, so a name changed here has to be changed there too. Some other
+places spell the same names: `scripts/package_shim.py` (the archive prefix, the
+installers and the version option), `scripts/package_release.py`,
+`rust/envoy-shim/build.rs` and `scripts/shim/install-envoy.ps1` (the platform
+labels). Adding a platform to the workflow means adding it to the layout:
+`tests/test_package_shim.py` fails until the two name the same platforms. The
+layout does not validate the version in an archive's name; whoever uses it does.
+
 Verify a release after it publishes:
 
 ```powershell

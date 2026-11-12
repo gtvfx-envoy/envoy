@@ -27,6 +27,14 @@ fn exe(name: &str) -> String {
     }
 }
 
+#[test]
+fn the_installers_a_release_publishes_are_the_scripts_in_the_repository() {
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/shim");
+    for name in envoy_config::layout::INSTALLERS {
+        assert!(scripts.join(name).is_file(), "{name} is not in {scripts:?}");
+    }
+}
+
 /// The label the published launcher folders use for this machine.
 fn target() -> Option<&'static str> {
     if cfg!(all(windows, target_arch = "x86_64")) {

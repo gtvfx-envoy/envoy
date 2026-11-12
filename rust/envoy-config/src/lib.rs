@@ -10,6 +10,8 @@
 //! - [`redirect`] parses and validates the file and resolves a user to a version.
 //! - [`expand`] turns a source template into a path.
 //! - [`locate`] says where the file may be found.
+//! - [`layout`] names the folders, files and platforms of the launcher on the
+//!   share, for the launcher that reads them and the tools that publish them.
 //! - [`snapshot`] keeps the last good copy, so envoy still starts when the
 //!   share is unreachable.
 //!
@@ -30,6 +32,7 @@
 
 pub mod error;
 pub mod expand;
+pub mod layout;
 pub mod locate;
 pub mod redirect;
 pub mod snapshot;

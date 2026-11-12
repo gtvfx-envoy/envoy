@@ -146,6 +146,37 @@ def testEveryWorkspaceMemberIsCheckedForTheReleaseVersion():
     assert members == release_automation.WORKSPACE_PACKAGE_NAMES
 
 
+RUST_ROOT = Path(__file__).parents[1] / "rust"
+
+
+def splitApi(entry: str) -> tuple[list[str], list[str]]:
+    """Split ``envoy_core::a::{X, Y}`` into the module path ``[envoy_core, a]`` and ``[X, Y]``."""
+    path, _, group = entry.partition("::{")
+    if group:
+        return path.split("::"), [n.strip() for n in group.rstrip("}").split(",") if n.strip()]
+    *module, name = entry.split("::")
+    return module, [name]
+
+
+def testEveryDirectUtilsApiIsNamedWhereItIsCompiledFromOutside():
+    """Each item Envoy Utils is told it may call is named, by its full path, in the contract test.
+
+    The compiler is what proves an item is public from outside the crate; this keeps the list and
+    that test from drifting apart. A name that appears only in a comment does not count.
+    """
+    contract = RUST_ROOT / "envoy-core" / "tests" / "external_contract.rs"
+    code = re.sub(r"//.*", "", contract.read_text(encoding="utf-8"))
+
+    for entry in release_automation.DIRECT_UTILS_APIS:
+        module, names = splitApi(entry)
+        assert module[0] == "envoy_core", entry
+        for name in names:
+            path = "::".join([*module, name])
+            assert re.search(rf"{re.escape(path)}\b", code), (
+                f"{path} is not named in {contract.name}"
+            )
+
+
 @pytest.mark.parametrize(
     ("changed", "relevant"),
     [
